@@ -53,6 +53,9 @@ class CostConfig(_Section):
     adv_reject_share: float = Field(alias="отказ_доля_adv", gt=0, le=1)
     stress_multiplier: float = Field(alias="стресс_множитель", ge=1)
     ndfl_rate: float = Field(alias="ндфл_ставка", ge=0, le=1)
+    short_borrow_rate: float = Field(
+        alias="ставка_займа_шорт_годовых", ge=0, le=1, default=0.18
+    )
 
 
 class BenchmarkConfig(_Section):

@@ -42,14 +42,23 @@ from trading.strategy.examples.monthly_ranked import (
     AbsoluteMomentum,
     CrossSectionalMomentum,
     MeanReversion,
+    ShortMomentum,
+    ShortOverbought,
 )
 
-HYPOTHESES = [
+HYPOTHESES_LONG = [
     ("Кросс-секционный моментум", CrossSectionalMomentum,
      {"lookback": [60, 120, 250], "top_n": [2, 3, 4]}),
     ("Моментум с фильтром падения", AbsoluteMomentum,
      {"lookback": [120, 250], "top_n": [2, 4]}),
     ("Возврат к среднему", MeanReversion,
+     {"lookback": [5, 10, 21], "top_n": [2, 3, 4]}),
+]
+
+HYPOTHESES_SHORT = [
+    ("Шорт: моментум вниз", ShortMomentum,
+     {"lookback": [60, 120, 250], "top_n": [2, 3, 4]}),
+    ("Шорт: откат перегретых", ShortOverbought,
      {"lookback": [5, 10, 21], "top_n": [2, 3, 4]}),
 ]
 
@@ -69,7 +78,11 @@ def main() -> int:
     parser.add_argument("--train-end", default="2022-04-30")
     parser.add_argument("--test-start", default="2022-05-01")
     parser.add_argument("--test-end", default="2026-07-22")
+    parser.add_argument("--набор", choices=["long", "short"], default="long",
+                        help="long — покупаем рост; short — зарабатываем на падениях")
     args = parser.parse_args()
+    hypotheses = HYPOTHESES_LONG if args.набор == "long" else HYPOTHESES_SHORT
+    allow_short = args.набор == "short"
 
     setup_logging()
     settings = load_settings()
@@ -125,6 +138,15 @@ def main() -> int:
         "смотреть walk-forward по всем окнам (docs/research_2026-07.md).",
         "",
     ]
+    if allow_short:
+        lines += [
+            f"Режим ШОРТ: плата за заём бумаг "
+            f"{settings.costs.short_borrow_rate:.0%} годовых учтена. "
+            "Дивиденды, которые шортист платит из своего кармана "
+            "(8–12% годовых на нашем рынке), НЕ учтены — результаты "
+            "шортов ЗАВЫШЕНЫ.",
+            "",
+        ]
     print("\n".join(lines))
 
     def run(candles, strategy, tag, trade_from):
@@ -134,9 +156,10 @@ def main() -> int:
             data_hash=f"{data_hash}|{tag}", source="llm",
             imoex_close=imoex_test if tag.startswith("тест") else None,
             trade_from=trade_from,
+            allow_short=allow_short,
         ).run()
 
-    for title, cls, grid in HYPOTHESES:
+    for title, cls, grid in hypotheses:
         combos = expand_grid(grid)
         best_params, best_metric = None, None
         for params in combos:
@@ -207,7 +230,8 @@ def main() -> int:
     lines += bench
     print("\n".join(bench))
 
-    out = Path(f"docs/research_from_{args.test_start[:7]}.md")
+    suffix = "_short" if allow_short else ""
+    out = Path(f"docs/research_from_{args.test_start[:7]}{suffix}.md")
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nПолный отчёт: {out}")
     client.close()

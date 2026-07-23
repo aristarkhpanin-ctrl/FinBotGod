@@ -88,19 +88,27 @@ class RiskGuards:
         side: str,                    # "buy" | "sell"
         order_value: float,
         portfolio_value: float,
-        position_value: float,        # текущая стоимость позиции по этой бумаге
+        position_value: float,        # |стоимость| позиции по этой бумаге
         n_positions: int,
         is_new_position: bool,
+        increases_risk: bool | None = None,
     ) -> OrderCheck:
-        """Проверяет одну заявку. Продажи ограничены только «стоп-системой»:
-        выйти из позиции можно всегда, кроме полного отказа системы."""
+        """Проверяет одну заявку.
+
+        ``increases_risk`` — увеличивает ли заявка |позицию| (покупка лонга
+        или ОТКРЫТИЕ ШОРТА). Заявки, уменьшающие риск (продажа лонга,
+        закрытие шорта), ограничены только «стоп-системой»: выйти из
+        позиции можно всегда, кроме полного отказа системы. Если параметр
+        не задан, риск-увеличение выводится из направления: buy = да."""
         self.new_day(day)
+        if increases_risk is None:
+            increases_risk = side == "buy"
 
         if self._halted_forever_reason:
-            final_liquidation_sell = (
-                side == "sell" and self._liquidation_pending == "навсегда"
+            final_liquidation = (
+                not increases_risk and self._liquidation_pending == "навсегда"
             )
-            if not final_liquidation_sell:
+            if not final_liquidation:
                 return OrderCheck(False, None, (
                     f"Система остановлена навсегда: {self._halted_forever_reason} "
                     f"Требуется ручной перезапуск."
@@ -123,22 +131,23 @@ class RiskGuards:
                 f"зацикливания. СИСТЕМА ОСТАНОВЛЕНА."
             )
 
-        if side == "sell":
+        if not increases_risk:
             self._orders_today += 1
-            return OrderCheck(True, None, "продажа разрешена")
+            return OrderCheck(True, None, "заявка на снижение риска разрешена")
 
-        # --- Дальше только покупки ---
+        # --- Дальше только заявки, УВЕЛИЧИВАЮЩИЕ риск (лонг или шорт) ---
 
         if self._buys_blocked_on == day:
             return OrderCheck(False, None, (
-                "Покупки запрещены: сегодня день остановки после срабатывания "
-                "дневного лимита убытка."
+                "Новые позиции запрещены: сегодня день остановки после "
+                "срабатывания дневного лимита убытка."
             ))
 
         if secid not in self.whitelist:
             reason = (
-                f"ИНЦИДЕНТ: попытка купить {secid} вне белого списка. Заявка "
-                f"отклонена. Стратегия не должна была даже предлагать эту бумагу."
+                f"ИНЦИДЕНТ: попытка открыть позицию {secid} вне белого списка. "
+                f"Заявка отклонена. Стратегия не должна была даже предлагать "
+                f"эту бумагу."
             )
             log.error(reason)
             return OrderCheck(False, None, reason)

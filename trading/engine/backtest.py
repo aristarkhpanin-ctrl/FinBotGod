@@ -80,6 +80,9 @@ class BacktestEngine:
         # trade_from: сделки только с этой даты; данные ДО неё стратегия
         # видит (это прошлое — для расчёта сигналов), но не торгует.
         # Метрики считаются с trade_from: разогрев не разбавляет доходность.
+        allow_short: bool = False,
+        # allow_short: разрешить короткие позиции. Плата за заём бумаг
+        # (издержки.ставка_займа_шорт_годовых) начисляется ежедневно.
     ):
         if ledger is None:
             raise ValueError(
@@ -94,6 +97,7 @@ class BacktestEngine:
         self.source = source
         self.journal = journal
         self.trade_from = pd.Timestamp(trade_from) if trade_from else None
+        self.allow_short = allow_short
         self.lot_sizes = lot_sizes
         self.cost_model = CostModel(settings.costs)
 
@@ -163,7 +167,7 @@ class BacktestEngine:
 
     def run(self) -> BacktestResult:
         s = self.settings
-        portfolio = Portfolio(s.capital.start_amount)
+        portfolio = Portfolio(s.capital.start_amount, allow_short=self.allow_short)
         execution = SimulatedExecution(portfolio, self.cost_model)
         decisions: list[str] = []
         limitations = [
@@ -217,6 +221,13 @@ class BacktestEngine:
                     decisions.append(f"{day.date().isoformat()}  ОСТАНОВКА  {halted_reason}")
             row = self.closes_ffill.iloc[i]
             prices = {sec: float(row[sec]) for sec in portfolio.positions}
+            # Плата за заём бумаг по коротким позициям — каждый торговый день.
+            if self.allow_short:
+                short_value = portfolio.short_value(prices)
+                if short_value > 0:
+                    portfolio.charge_borrow_fee(
+                        short_value * s.costs.short_borrow_rate / 252
+                    )
             equity_value = portfolio.equity(prices)
             equity_values.append(equity_value)
             # Проверка предохранителей по фактической стоимости портфеля.
@@ -253,6 +264,12 @@ class BacktestEngine:
         metrics = compute_metrics(
             equity, s.benchmark.risk_free_rate, fills=execution.fills
         )
+        if portfolio.total_borrow_fees > 0:
+            # Плата за заём — такие же издержки, как комиссии и спред.
+            metrics["borrow_fees"] = portfolio.total_borrow_fees
+            metrics["total_costs"] = (
+                metrics.get("total_costs", 0.0) + portfolio.total_borrow_fees
+            )
         days_span = (equity.index[-1] - equity.index[0]).days
         benchmarks = {
             "денежный_рынок": money_market_benchmark(
@@ -277,6 +294,7 @@ class BacktestEngine:
                 "signal_shift_days": self.signal_shift,
                 "stress_multiplier": s.costs.stress_multiplier,
                 "capital": s.capital.start_amount,
+                "allow_short": self.allow_short,
             },
             data_hash=self.data_hash,
             metrics_is={
@@ -327,19 +345,44 @@ class BacktestEngine:
                 )
                 continue
             price = float(o)
-            shares = portfolio.shares_of(secid)
+            held = portfolio.shares_of(secid)
+            side = "sell" if held > 0 else "buy"   # шорт закрывается покупкой
+            shares = abs(held)
+            lot = self.lot_sizes.get(secid, 1)
+            if side == "buy":
+                # Закрытие шорта требует денег — при нехватке частично.
+                lots = shares // lot
+                while lots > 0:
+                    order_value = lots * lot * price
+                    try:
+                        cost_est = self.cost_model.trade_costs(
+                            order_value, float(self.adv20.loc[t, secid])
+                        ).total
+                    except UnfillableOrderError:
+                        break
+                    if order_value + cost_est <= portfolio.cash:
+                        break
+                    lots -= 1
+                if lots == 0:
+                    decisions.append(
+                        f"{day_str}  ЛИКВИДАЦИЯ ОТЛОЖЕНА  {secid}: не хватает "
+                        f"денег на закрытие шорта"
+                    )
+                    continue
+                shares = lots * lot
             check = self.guards.check_order(
-                day.date(), secid, "sell", shares * price, pv,
-                position_value=shares * price,
+                day.date(), secid, side, shares * price, pv,
+                position_value=abs(held) * price,
                 n_positions=len(portfolio.positions),
                 is_new_position=False,
+                increases_risk=False,
             )
             if not check.allowed:
                 decisions.append(f"{day_str}  ОТКАЗ  {secid}: {check.reason_ru}")
                 continue
             adv = float(self.adv20.loc[t, secid])
             try:
-                fill = execution.execute(day.date(), secid, "sell", shares, price, adv)
+                fill = execution.execute(day.date(), secid, side, shares, price, adv)
             except UnfillableOrderError as e:
                 decisions.append(
                     f"{day_str}  ЛИКВИДАЦИЯ ОТЛОЖЕНА  {secid}: {e}"
@@ -362,7 +405,7 @@ class BacktestEngine:
         pv = portfolio.equity({sec: prices[sec] for sec in portfolio.positions})
         day_str = day.date().isoformat()
 
-        targets = {sec: w for sec, w in (weights or {}).items() if w > 0}
+        targets = {sec: w for sec, w in (weights or {}).items() if w != 0}
         involved = sorted(set(targets) | set(portfolio.positions))
         plans = []
         for secid in involved:
@@ -374,113 +417,164 @@ class BacktestEngine:
             held_shares = portfolio.shares_of(secid)
             weight = targets.get(secid, 0.0)
             if o is None or math.isnan(o):
-                if held_shares > 0 or weight > 0:
+                if held_shares != 0 or weight != 0:
                     decisions.append(
                         f"{day_str}  ОТЛОЖЕНО  {secid}: нет торгов в этот день"
                     )
                 continue
+            if weight < 0 and not self.allow_short:
+                decisions.append(
+                    f"{day_str}  ОТКАЗ  {secid}: стратегия просит шорт, "
+                    f"но короткие позиции выключены (allow_short=False)"
+                )
+                weight = 0.0
             price = float(o)
-            weight_capped = min(weight, s.risk.max_position_pct)
+            weight_capped = (
+                math.copysign(min(abs(weight), s.risk.max_position_pct), weight)
+                if weight else 0.0
+            )
             lot_cost = price * lot
-            held_lots = held_shares // lot
-            raw = pv * weight_capped / lot_cost if weight_capped > 0 else 0.0
-            # Новая позиция — floor (ТЗ, раздел 6). Корректировка существующей —
-            # к ближайшему лоту: иначе издержки чуть уменьшают портфель, floor
-            # даёт на лот меньше, и движок бесконечно продаёт/покупает один лот.
-            desired = int(raw) if held_lots == 0 else int(raw + 0.5)
-            if weight_capped > 0 and desired == 0 and held_lots == 0:
+            held_lots = int(held_shares / lot)   # знак сохраняется (шорт < 0)
+            raw = pv * weight_capped / lot_cost if weight_capped else 0.0
+            # Новая позиция — усечение к нулю, т.е. floor по модулю (ТЗ, раздел 6).
+            # Корректировка существующей — к ближайшему лоту: иначе издержки чуть
+            # уменьшают портфель и движок бесконечно гоняет один лот туда-сюда.
+            if held_lots == 0:
+                desired = int(raw)
+            else:
+                desired = int(raw + math.copysign(0.5, raw)) if raw else 0
+            if weight_capped != 0 and desired == 0 and held_lots == 0:
                 decisions.append(
                     f"{day_str}  ПРОПУСК  {secid}: целевая сумма "
-                    f"{fmt_rub(pv * weight_capped, 0)} ₽ меньше стоимости "
+                    f"{fmt_rub(abs(pv * weight_capped), 0)} ₽ меньше стоимости "
                     f"одного лота {fmt_rub(lot_cost, 0)} ₽"
                 )
                 continue
             delta = desired - held_lots
             if delta != 0:
-                plans.append((secid, delta, lot, price, weight))
+                plans.append((secid, held_lots, desired, delta, lot, price, weight))
 
-        # Сначала продажи — освобождают деньги.
-        for secid, delta, lot, price, weight in plans:
-            if delta >= 0:
-                continue
-            shares = -delta * lot
-            adv = float(self.adv20.loc[t, secid])
-            check = self.guards.check_order(
-                day.date(), secid, "sell", shares * price, pv,
-                position_value=portfolio.shares_of(secid) * price,
-                n_positions=len(portfolio.positions),
-                is_new_position=False,
-            )
-            if not check.allowed:
-                decisions.append(f"{day_str}  ОТКАЗ  {secid} (продажа): {check.reason_ru}")
-                continue
-            try:
-                fill = execution.execute(day.date(), secid, "sell", shares, price, adv)
-            except UnfillableOrderError as e:
-                decisions.append(f"{day_str}  ОТКАЗ  {secid} (продажа): {e}")
-                continue
-            decisions.append(
-                f"{day_str}  ПРОДАЖА  {secid}  {-delta} лот = {shares} шт "
-                f"по {fmt_rub(price)} ₽ = {fmt_rub(fill.order_value)} ₽ | "
-                f"издержки {fmt_rub(fill.costs.total)} ₽ | "
-                f"зафиксировано {fill.realized_pnl:+.2f} ₽ | "
-                f"причина: целевая доля {weight:.0%}"
-            )
+        # Порядок исполнения: сначала заявки, снижающие риск (продажа лонга,
+        # закрытие шорта) — они освобождают деньги и лимиты; затем заявки,
+        # увеличивающие риск. Внутри групп продажи раньше покупок (дают кэш).
+        def order_key(plan):
+            secid, held_lots, desired, delta, *_ = plan
+            increases = abs(desired) > abs(held_lots)
+            return (increases, delta > 0, secid)
 
-        # Затем покупки.
-        for secid, delta, lot, price, weight in plans:
-            if delta <= 0:
-                continue
+        for secid, held_lots, desired, delta, lot, price, weight in sorted(
+            plans, key=order_key
+        ):
+            increases = abs(desired) > abs(held_lots)
             adv = float(self.adv20.loc[t, secid])
-            lots = delta
-            liquidity_note = money_note = False
-            while lots > 0:
-                order_value = lots * lot * price
-                try:
-                    costs = self.cost_model.trade_costs(order_value, adv)
-                except UnfillableOrderError:
-                    liquidity_note = True
-                    lots -= 1
-                    continue
-                if order_value + costs.total <= portfolio.cash:
-                    break
-                money_note = True
-                lots -= 1
-            if lots == 0:
-                why = ("ликвидности не хватает" if liquidity_note
-                       else "не хватает денег с учётом издержек")
-                decisions.append(
-                    f"{day_str}  ПРОПУСК  {secid}: {why} "
-                    f"(свободно {fmt_rub(portfolio.cash, 0)} ₽)"
+            lot_cost = lot * price
+            held_value = abs(portfolio.shares_of(secid)) * price
+            if delta < 0:
+                # Продажа: снижение лонга и/или открытие (наращивание) шорта.
+                lots = -delta
+                exposure_note = False
+                if increases:
+                    # Совокупная шорт-экспозиция не больше стоимости портфеля.
+                    room = pv - portfolio.short_value(prices)
+                    lots_by_room = max(int(room / lot_cost), 0)
+                    if lots > lots_by_room:
+                        lots, exposure_note = lots_by_room, True
+                    if lots == 0:
+                        decisions.append(
+                            f"{day_str}  ПРОПУСК  {secid}: лимит совокупной "
+                            f"шорт-экспозиции (100% портфеля) исчерпан"
+                        )
+                        continue
+                check = self.guards.check_order(
+                    day.date(), secid, "sell", lots * lot_cost, pv,
+                    position_value=held_value,
+                    n_positions=len(portfolio.positions),
+                    is_new_position=held_lots == 0,
+                    increases_risk=increases,
                 )
-                continue
-            # Независимая проверка риск-слоя — последняя линия обороны.
-            held_value = portfolio.shares_of(secid) * price
-            check = self.guards.check_order(
-                day.date(), secid, "buy", lots * lot * price, pv,
-                position_value=held_value,
-                n_positions=len(portfolio.positions),
-                is_new_position=portfolio.shares_of(secid) == 0,
-            )
-            if not check.allowed:
-                decisions.append(f"{day_str}  ОТКАЗ  {secid}: {check.reason_ru}")
-                continue
-            if check.max_value is not None:
-                lots = min(lots, int(check.max_value / (lot * price)))
-                decisions.append(f"{day_str}  РИСК-СЛОЙ  {check.reason_ru}")
-                if lots == 0:
+                if not check.allowed:
+                    decisions.append(f"{day_str}  ОТКАЗ  {secid}: {check.reason_ru}")
                     continue
-            shares = lots * lot
-            fill = execution.execute(day.date(), secid, "buy", shares, price, adv)
-            note = ""
-            if liquidity_note:
-                note = " | заявка обрезана по ликвидности"
-            elif money_note:
-                note = " | заявка обрезана по деньгам"
-            decisions.append(
-                f"{day_str}  ПОКУПКА  {secid}  {lots} лот = {shares} шт "
-                f"по {fmt_rub(price)} ₽ = {fmt_rub(fill.order_value)} ₽ | "
-                f"издержки {fmt_rub(fill.costs.total)} ₽ | "
-                f"кэш после: {fmt_rub(portfolio.cash, 0)} ₽ | "
-                f"причина: целевая доля {weight:.0%}{note}"
-            )
+                if check.max_value is not None:
+                    lots = min(lots, int(check.max_value / lot_cost))
+                    decisions.append(f"{day_str}  РИСК-СЛОЙ  {check.reason_ru}")
+                    if lots == 0:
+                        continue
+                shares = lots * lot
+                try:
+                    fill = execution.execute(
+                        day.date(), secid, "sell", shares, price, adv
+                    )
+                except UnfillableOrderError as e:
+                    decisions.append(f"{day_str}  ОТКАЗ  {secid} (продажа): {e}")
+                    continue
+                action = "ШОРТ" if increases else "ПРОДАЖА"
+                realized_note = (
+                    f" | зафиксировано {fill.realized_pnl:+.2f} ₽"
+                    if fill.realized_pnl is not None else ""
+                )
+                decisions.append(
+                    f"{day_str}  {action}  {secid}  {lots} лот = {shares} шт "
+                    f"по {fmt_rub(price)} ₽ = {fmt_rub(fill.order_value)} ₽ | "
+                    f"издержки {fmt_rub(fill.costs.total)} ₽{realized_note} | "
+                    f"причина: целевая доля {weight:.0%}"
+                    + (" | обрезано лимитом шорт-экспозиции" if exposure_note else "")
+                )
+            else:
+                # Покупка: закрытие шорта и/или открытие (наращивание) лонга.
+                lots = delta
+                liquidity_note = money_note = False
+                while lots > 0:
+                    order_value = lots * lot_cost
+                    try:
+                        costs = self.cost_model.trade_costs(order_value, adv)
+                    except UnfillableOrderError:
+                        liquidity_note = True
+                        lots -= 1
+                        continue
+                    if order_value + costs.total <= portfolio.cash:
+                        break
+                    money_note = True
+                    lots -= 1
+                if lots == 0:
+                    why = ("ликвидности не хватает" if liquidity_note
+                           else "не хватает денег с учётом издержек")
+                    decisions.append(
+                        f"{day_str}  ПРОПУСК  {secid}: {why} "
+                        f"(свободно {fmt_rub(portfolio.cash, 0)} ₽)"
+                    )
+                    continue
+                check = self.guards.check_order(
+                    day.date(), secid, "buy", lots * lot_cost, pv,
+                    position_value=held_value,
+                    n_positions=len(portfolio.positions),
+                    is_new_position=held_lots == 0,
+                    increases_risk=increases,
+                )
+                if not check.allowed:
+                    decisions.append(f"{day_str}  ОТКАЗ  {secid}: {check.reason_ru}")
+                    continue
+                if check.max_value is not None:
+                    lots = min(lots, int(check.max_value / lot_cost))
+                    decisions.append(f"{day_str}  РИСК-СЛОЙ  {check.reason_ru}")
+                    if lots == 0:
+                        continue
+                shares = lots * lot
+                fill = execution.execute(day.date(), secid, "buy", shares, price, adv)
+                note = ""
+                if liquidity_note:
+                    note = " | заявка обрезана по ликвидности"
+                elif money_note:
+                    note = " | заявка обрезана по деньгам"
+                action = "ЗАКРЫТИЕ ШОРТА" if held_lots < 0 else "ПОКУПКА"
+                realized_note = (
+                    f" | зафиксировано {fill.realized_pnl:+.2f} ₽"
+                    if fill.realized_pnl is not None else ""
+                )
+                decisions.append(
+                    f"{day_str}  {action}  {secid}  {lots} лот = {shares} шт "
+                    f"по {fmt_rub(price)} ₽ = {fmt_rub(fill.order_value)} ₽ | "
+                    f"издержки {fmt_rub(fill.costs.total)} ₽{realized_note} | "
+                    f"кэш после: {fmt_rub(portfolio.cash, 0)} ₽ | "
+                    f"причина: целевая доля {weight:.0%}{note}"
+                )

@@ -98,10 +98,10 @@ def compute_metrics(
         total_costs = sum(f.costs.total for f in fills)
         turnover = sum(f.order_value for f in fills)
         gross_profit = (end - start) + total_costs  # прибыль ДО издержек
-        sells = [f for f in fills if f.side == "sell"]
-        wins = [f for f in sells if (f.realized_pnl or 0) > 0]
-        gains = sum(f.realized_pnl for f in sells if (f.realized_pnl or 0) > 0)
-        losses = -sum(f.realized_pnl for f in sells if (f.realized_pnl or 0) < 0)
+        closers = [f for f in fills if f.realized_pnl is not None]
+        wins = [f for f in closers if f.realized_pnl > 0]
+        gains = sum(f.realized_pnl for f in closers if f.realized_pnl > 0)
+        losses = -sum(f.realized_pnl for f in closers if f.realized_pnl < 0)
         metrics.update(
             {
                 "n_trades": len(fills),
@@ -110,7 +110,7 @@ def compute_metrics(
                 "costs_pct_of_gross": (
                     total_costs / gross_profit if gross_profit > 0 else float("nan")
                 ),
-                "win_rate": len(wins) / len(sells) if sells else float("nan"),
+                "win_rate": len(wins) / len(closers) if closers else float("nan"),
                 "profit_factor": (
                     gains / losses if losses > 0
                     else (float("inf") if gains > 0 else float("nan"))

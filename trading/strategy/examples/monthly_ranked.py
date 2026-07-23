@@ -20,7 +20,12 @@ import pandas as pd
 
 
 class _MonthlyRanked:
-    """Каркас: месячная ребалансировка по ранжированию доходностей."""
+    """Каркас: месячная ребалансировка по ранжированию доходностей.
+
+    ``direction`` = +1 — лонг (покупаем выбранных), −1 — шорт (продаём
+    выбранных без покрытия; движок должен быть с allow_short=True)."""
+
+    direction = +1
 
     def __init__(self, lookback: int, top_n: int):
         if lookback < 2:
@@ -58,7 +63,7 @@ class _MonthlyRanked:
                 returns[secid] = float(df["close"].iloc[-1]) / past - 1
 
         selected = self._select(returns)
-        weight = 1.0 / self.top_n if selected else 0.0
+        weight = self.direction * (1.0 / self.top_n) if selected else 0.0
         self._weights = {secid: weight for secid in selected}
         return self._weights
 
@@ -116,4 +121,48 @@ class MeanReversion(_MonthlyRanked):
         return (
             f"Раз в месяц покупать {self.top_n} бумаг с наибольшим падением за "
             f"{self.lookback} торговых дней — ставка на отскок."
+        )
+
+
+class ShortMomentum(_MonthlyRanked):
+    """Шорт-гипотеза 1: падающие продолжают падать — шортить худших.
+
+    В шорт попадают только бумаги с ОТРИЦАТЕЛЬНОЙ доходностью за период:
+    шортить растущую бумагу в надежде на разворот — другая гипотеза
+    (см. ShortOverbought). Нет падающих — портфель в кэше."""
+
+    direction = -1
+
+    def __init__(self, lookback: int, top_n: int):
+        super().__init__(lookback, top_n)
+        self.name = f"short_momentum_{lookback}_{top_n}"
+
+    def _select(self, returns: dict[str, float]) -> list[str]:
+        ranked = sorted(returns, key=returns.get)   # худшие первыми
+        return [s for s in ranked if returns[s] < 0][: self.top_n]
+
+    def explain_ru(self) -> str:
+        return (
+            f"Раз в месяц шортить {self.top_n} бумаг с наибольшим падением за "
+            f"{self.lookback} торговых дней — ставка на продолжение падения."
+        )
+
+
+class ShortOverbought(_MonthlyRanked):
+    """Шорт-гипотеза 2: перегретые лидеры роста откатываются — шортить их."""
+
+    direction = -1
+
+    def __init__(self, lookback: int, top_n: int):
+        super().__init__(lookback, top_n)
+        self.name = f"short_overbought_{lookback}_{top_n}"
+
+    def _select(self, returns: dict[str, float]) -> list[str]:
+        ranked = sorted(returns, key=returns.get, reverse=True)  # лидеры первыми
+        return [s for s in ranked if returns[s] > 0][: self.top_n]
+
+    def explain_ru(self) -> str:
+        return (
+            f"Раз в месяц шортить {self.top_n} бумаг с наибольшим ростом за "
+            f"{self.lookback} торговых дней — ставка на откат перегретых."
         )

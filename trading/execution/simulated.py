@@ -27,7 +27,7 @@ class Fill:
     price: float              # цена исполнения (open дня T+1)
     order_value: float
     costs: TradeCosts
-    realized_pnl: float | None   # только для продаж
+    realized_pnl: float | None   # для заявок, закрывающих позицию (лонг или шорт)
 
 
 class SimulatedExecution:
@@ -45,9 +45,9 @@ class SimulatedExecution:
         портфеля."""
         order_value = shares * price
         costs = self.cost_model.trade_costs(order_value, adv_20)
-        realized = None
         if side == "buy":
-            self.portfolio.buy(secid, shares, price, costs, day)
+            # Покупка может закрывать шорт — тогда есть зафиксированный результат.
+            realized = self.portfolio.buy(secid, shares, price, costs, day)
         elif side == "sell":
             realized = self.portfolio.sell(secid, shares, price, costs, day)
         else:
