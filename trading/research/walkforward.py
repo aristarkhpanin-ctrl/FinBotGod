@@ -300,6 +300,18 @@ class WalkForwardRunner:
             for key, factors in combo_factors.items()
             if factors
         }
+        # OOS-итог каждой конфигурации — отдельной записью в журнал гипотез:
+        # сводка журнала обязана видеть out-of-sample, а не только in-sample.
+        for params in self.combos:
+            key = self._key(params)
+            if key in configs_annual and not math.isnan(configs_annual[key]):
+                self.ledger.record(
+                    hypothesis=self.strategy_factory(**params).explain_ru(),
+                    source=self.source,
+                    params=params,
+                    data_hash=f"{self.data_hash}|oos-склейка",
+                    metrics_oos={"annual_return": configs_annual[key]},
+                )
         annual_values = [v for v in configs_annual.values() if not math.isnan(v)]
         best_oos = max(annual_values) if annual_values else float("nan")
         median_oos = statistics.median(annual_values) if annual_values else float("nan")

@@ -138,8 +138,15 @@ class TestOverfitIsCaught:
         assert result.verdict_ru in result.report_ru
 
     def test_every_config_recorded_in_ledger(self, result):
-        # 3 окна × 2 конфигурации × (обучение + проверка) + 3 прогона склейки.
-        assert result._ledger.count() == 3 * 2 * 2 + 3
+        # 3 окна × 2 конфигурации × (обучение + проверка) + 3 прогона склейки
+        # + 2 итоговые OOS-записи (по одной на конфигурацию).
+        assert result._ledger.count() == 3 * 2 * 2 + 3 + 2
+
+    def test_ledger_summary_sees_oos_metrics(self, result):
+        """Сводка журнала обязана видеть out-of-sample, а не «нет метрик»."""
+        summary = result._ledger.summary_ru()
+        assert "Лучшая по OOS-доходности" in summary
+        assert "выводы делать не по чему" not in summary
 
 
 class TestPassingStrategy:
