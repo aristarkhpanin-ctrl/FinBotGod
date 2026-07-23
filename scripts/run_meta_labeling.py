@@ -199,6 +199,7 @@ def main() -> int:
 
     carried = {name: settings.capital.start_amount for name in variants}
     oos_segments = {name: [] for name in variants}
+    oos_fills = {name: [] for name in variants}
     trained_windows = 0
 
     for w in windows:
@@ -217,6 +218,7 @@ def main() -> int:
                                  w.test_start, w.test_end)
             carried[name] = float(result.equity.iloc[-1])
             oos_segments[name].append(result.equity)
+            oos_fills[name].extend(result.fills)
 
     # Метрики по склейке проверочных окон.
     rf = settings.benchmark.risk_free_rate
@@ -224,7 +226,7 @@ def main() -> int:
     for name in variants:
         equity = pd.concat(oos_segments[name])
         equity = equity[~equity.index.duplicated(keep="last")]
-        m = compute_metrics(equity, rf)
+        m = compute_metrics(equity, rf, fills=oos_fills[name])
         rets = equity.pct_change().dropna()
         stats[name] = m
         daily_sharpes[name] = per_period_sharpe(rets)
