@@ -147,6 +147,7 @@ class TestPassingStrategy:
         candles = yearly_candles({y: 0.80 for y in range(2015, 2022)})
         settings = load_settings().model_copy(deep=True)
         settings.risk.max_position_pct = 1.0
+        settings.risk.max_order_value = 10_000_000  # иначе риск-слой остановит
         result = make_runner(
             candles, {"weight": [1.0]}, tmp_path, settings=settings
         ).run()

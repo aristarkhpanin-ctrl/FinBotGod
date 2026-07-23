@@ -122,6 +122,7 @@ class TestLookAheadGuard:
     def _run(self, tmp_path, shift: int) -> float:
         settings = load_settings().model_copy(deep=True)
         settings.risk.max_position_pct = 1.0  # моментум на всё — виднее эффект
+        settings.risk.max_order_value = 10_000_000  # иначе риск-слой остановит
         result = make_engine(
             momentum_candles(), Momentum1D(), tmp_path,
             settings=settings, signal_shift_days=shift,

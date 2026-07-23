@@ -39,6 +39,7 @@ from trading.reporting.metrics import (
     money_market_benchmark,
 )
 from trading.research.ledger import HypothesisLedger
+from trading.risk.guards import RiskGuards, SystemHalted
 from trading.settings import Settings
 
 log = get_logger("backtest")
@@ -55,6 +56,8 @@ class BacktestResult:
     resolution_report: str
     limitations: list[str]
     run_hash: str
+    guard_events: list[str]      # сработавшие предохранители
+    halted_reason: str | None    # система остановлена предохранителем
     report_ru: str = ""
 
 
@@ -70,6 +73,7 @@ class BacktestEngine:
         imoex_close: pd.Series | None = None,
         signal_shift_days: int = 0,
         source: str = "человек",
+        whitelist: list[str] | None = None,
     ):
         if ledger is None:
             raise ValueError(
@@ -95,6 +99,13 @@ class BacktestEngine:
             self.candles[secid] = d
         if not self.candles:
             raise ValueError("Бэктест без данных невозможен: нет ни одной свечи.")
+
+        # Независимый риск-слой: белый список по умолчанию — все бумаги,
+        # по которым есть данные (в боевом контуре — universe.yaml).
+        self.guards = RiskGuards(
+            settings.risk,
+            set(whitelist) if whitelist is not None else set(self.candles),
+        )
 
         all_dates = sorted(set().union(*(set(d["date"]) for d in self.candles.values())))
         self.dates = pd.DatetimeIndex(all_dates)
@@ -164,16 +175,44 @@ class BacktestEngine:
             max_position_pct=s.risk.max_position_pct,
         )
 
+        guard_events: list[str] = []
+        halted_reason: str | None = None
         equity_values: list[float] = []
         for i, day in enumerate(self.dates):
-            signal_idx = i - 1 - self.signal_shift
-            if i >= 1 and signal_idx >= 0:
-                t = self.dates[signal_idx]
-                weights = self.strategy.target_weights(self._slices_until(t))
-                self._execute_day(i, day, t, weights, portfolio, execution, decisions)
+            trading_allowed = (
+                halted_reason is None
+                and not (self.guards.halted_forever and
+                         self.guards.liquidation_pending is None)
+            )
+            if i >= 1 and trading_allowed:
+                self.guards.new_day(day.date())
+                try:
+                    if self.guards.liquidation_pending:
+                        self._liquidate_all(i, day, portfolio, execution, decisions)
+                    else:
+                        signal_idx = i - 1 - self.signal_shift
+                        if signal_idx >= 0:
+                            t = self.dates[signal_idx]
+                            weights = self.strategy.target_weights(
+                                self._slices_until(t)
+                            )
+                            self._execute_day(
+                                i, day, t, weights, portfolio, execution, decisions
+                            )
+                except SystemHalted as e:
+                    halted_reason = str(e)
+                    guard_events.append(f"{day.date()}  {halted_reason}")
+                    decisions.append(f"{day.date().isoformat()}  ОСТАНОВКА  {halted_reason}")
             row = self.closes_ffill.iloc[i]
             prices = {sec: float(row[sec]) for sec in portfolio.positions}
-            equity_values.append(portfolio.equity(prices))
+            equity_value = portfolio.equity(prices)
+            equity_values.append(equity_value)
+            # Проверка предохранителей по фактической стоимости портфеля.
+            if halted_reason is None:
+                verdict = self.guards.check_equity(day.date(), equity_value)
+                if verdict:
+                    guard_events.append(f"{day.date()}  {verdict}")
+                    decisions.append(f"{day.date().isoformat()}  {verdict}")
 
         equity = pd.Series(equity_values, index=self.dates, name="equity")
         metrics = compute_metrics(
@@ -212,16 +251,65 @@ class BacktestEngine:
             },
         )
 
+        if self.guards.halted_forever and halted_reason is None:
+            halted_reason = self.guards.halted_forever
         result = BacktestResult(
             equity=equity, fills=execution.fills, decisions=decisions,
             metrics=metrics, benchmarks=benchmarks, ndfl_by_year=ndfl,
             resolution_report=resolution, limitations=limitations,
-            run_hash=run_hash,
+            run_hash=run_hash, guard_events=guard_events,
+            halted_reason=halted_reason,
         )
         from trading.reporting.report import full_report_ru
 
         result.report_ru = full_report_ru(s, result)
         return result
+
+    # ---------- Ликвидация по предохранителю ----------
+
+    def _liquidate_all(self, exec_idx, day, portfolio, execution, decisions):
+        """Продажа всех позиций по open — после срабатывания дневного
+        лимита убытка или лимита просадки. Позиции без торгов в этот день
+        остаются до следующего дня (только лимитные заявки, чудес нет)."""
+        kind = self.guards.liquidation_pending
+        opens_row = self.opens.iloc[exec_idx]
+        t = self.dates[exec_idx - 1]
+        day_str = day.date().isoformat()
+        prices = self._valuation_prices(exec_idx, opens_row)
+        pv = portfolio.equity({sec: prices[sec] for sec in portfolio.positions})
+        for secid in sorted(portfolio.positions):
+            o = opens_row.get(secid)
+            if o is None or math.isnan(o):
+                decisions.append(
+                    f"{day_str}  ЛИКВИДАЦИЯ ОТЛОЖЕНА  {secid}: нет торгов"
+                )
+                continue
+            price = float(o)
+            shares = portfolio.shares_of(secid)
+            check = self.guards.check_order(
+                day.date(), secid, "sell", shares * price, pv,
+                position_value=shares * price,
+                n_positions=len(portfolio.positions),
+                is_new_position=False,
+            )
+            if not check.allowed:
+                decisions.append(f"{day_str}  ОТКАЗ  {secid}: {check.reason_ru}")
+                continue
+            adv = float(self.adv20.loc[t, secid])
+            try:
+                fill = execution.execute(day.date(), secid, "sell", shares, price, adv)
+            except UnfillableOrderError as e:
+                decisions.append(
+                    f"{day_str}  ЛИКВИДАЦИЯ ОТЛОЖЕНА  {secid}: {e}"
+                )
+                continue
+            decisions.append(
+                f"{day_str}  ЛИКВИДАЦИЯ ({kind})  {secid}  {shares} шт "
+                f"по {fmt_rub(price)} ₽ = {fmt_rub(fill.order_value)} ₽ | "
+                f"издержки {fmt_rub(fill.costs.total)} ₽"
+            )
+        if not portfolio.positions:
+            self.guards.liquidation_done(day.date())
 
     # ---------- Исполнение одного дня ----------
 
@@ -275,6 +363,15 @@ class BacktestEngine:
                 continue
             shares = -delta * lot
             adv = float(self.adv20.loc[t, secid])
+            check = self.guards.check_order(
+                day.date(), secid, "sell", shares * price, pv,
+                position_value=portfolio.shares_of(secid) * price,
+                n_positions=len(portfolio.positions),
+                is_new_position=False,
+            )
+            if not check.allowed:
+                decisions.append(f"{day_str}  ОТКАЗ  {secid} (продажа): {check.reason_ru}")
+                continue
             try:
                 fill = execution.execute(day.date(), secid, "sell", shares, price, adv)
             except UnfillableOrderError as e:
@@ -291,13 +388,6 @@ class BacktestEngine:
         # Затем покупки.
         for secid, delta, lot, price, weight in plans:
             if delta <= 0:
-                continue
-            if portfolio.shares_of(secid) == 0 and \
-                    len(portfolio.positions) >= s.risk.max_positions:
-                decisions.append(
-                    f"{day_str}  ПРОПУСК  {secid}: лимит числа позиций "
-                    f"({s.risk.max_positions}) исчерпан"
-                )
                 continue
             adv = float(self.adv20.loc[t, secid])
             lots = delta
@@ -322,6 +412,22 @@ class BacktestEngine:
                     f"(свободно {fmt_rub(portfolio.cash, 0)} ₽)"
                 )
                 continue
+            # Независимая проверка риск-слоя — последняя линия обороны.
+            held_value = portfolio.shares_of(secid) * price
+            check = self.guards.check_order(
+                day.date(), secid, "buy", lots * lot * price, pv,
+                position_value=held_value,
+                n_positions=len(portfolio.positions),
+                is_new_position=portfolio.shares_of(secid) == 0,
+            )
+            if not check.allowed:
+                decisions.append(f"{day_str}  ОТКАЗ  {secid}: {check.reason_ru}")
+                continue
+            if check.max_value is not None:
+                lots = min(lots, int(check.max_value / (lot * price)))
+                decisions.append(f"{day_str}  РИСК-СЛОЙ  {check.reason_ru}")
+                if lots == 0:
+                    continue
             shares = lots * lot
             fill = execution.execute(day.date(), secid, "buy", shares, price, adv)
             note = ""

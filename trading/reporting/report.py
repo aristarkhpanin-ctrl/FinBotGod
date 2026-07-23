@@ -57,6 +57,14 @@ def full_report_ru(settings: Settings, result) -> str:
     m = result.metrics
     rf = settings.benchmark.risk_free_rate
     lines: list[str] = [breakeven_header_ru(settings), ""]
+    if getattr(result, "halted_reason", None):
+        lines += [
+            "=" * 64,
+            "!!! СИСТЕМА ОСТАНОВЛЕНА ПРЕДОХРАНИТЕЛЕМ !!!",
+            f"!!! {result.halted_reason}",
+            "=" * 64,
+            "",
+        ]
     lines += [result.resolution_report, ""]
 
     strategy_annual = m.get("annual_return")
@@ -105,6 +113,13 @@ def full_report_ru(settings: Settings, result) -> str:
         lines.append(f"  НДФЛ 13% с зафиксированной прибыли: {fmt_rub(total_ndfl, 0)} ₽ ({by_year})")
     else:
         lines.append("  НДФЛ: прибыль не фиксировалась, налога нет")
+
+    guard_events = getattr(result, "guard_events", [])
+    lines += ["", "ПРЕДОХРАНИТЕЛИ РИСК-СЛОЯ:"]
+    if guard_events:
+        lines += [f"  {e}" for e in guard_events]
+    else:
+        lines.append("  не срабатывали")
 
     if settings.costs.stress_multiplier > 1:
         lines += [
