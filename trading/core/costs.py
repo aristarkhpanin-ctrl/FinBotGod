@@ -94,7 +94,7 @@ class CostModel:
         """
         if order_value <= 0:
             raise ValueError(f"Сумма сделки должна быть больше нуля: {order_value}")
-        if adv_20 <= 0:
+        if not (adv_20 > 0):  # ловит и ноль, и отрицательные, и NaN
             raise UnfillableOrderError(
                 "Средний дневной оборот бумаги неизвестен или равен нулю — "
                 "сделка отклонена."

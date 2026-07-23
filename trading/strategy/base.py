@@ -19,6 +19,10 @@ class Strategy(Protocol):
 
     name: str
 
+    def params(self) -> dict:
+        """Полный набор параметров — уходит в журнал гипотез при каждом прогоне."""
+        ...
+
     def target_weights(self, data_until_t: dict[str, pd.DataFrame]) -> dict[str, float]:
         """Целевые доли портфеля по тикерам на основе данных до дня T.
 
