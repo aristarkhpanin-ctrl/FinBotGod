@@ -119,7 +119,13 @@ def main() -> int:
     print("=" * 72)
     calendar = build_trading_calendar(frames)
     print(f"Опорный торговый календарь: {len(calendar)} дней "
-          f"(объединение дат по всем бумагам)\n")
+          f"(объединение дат по всем бумагам)")
+    if settings.data.confirmed_events:
+        print("Подтверждённые рыночные события (скачки в эти даты — не аномалии):")
+        for event in settings.data.confirmed_events:
+            scope = ", ".join(event.tickers) if event.tickers else "все бумаги"
+            print(f"  {event.date} ({scope}): {event.reason}")
+    print()
     suspicious: list[str] = []
     total_anomalies = 0
     for secid, df in sorted(frames.items()):
@@ -127,6 +133,7 @@ def main() -> int:
             df, secid,
             jump_threshold=settings.data.price_jump_threshold,
             trading_calendar=calendar,
+            confirmed_events=settings.data.confirmed_events,
         )
         print(report.describe_ru())
         total_anomalies += report.total_anomalies

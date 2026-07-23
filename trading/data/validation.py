@@ -8,6 +8,11 @@
 Скачок цены больше порога помечает бумагу как подозрительную: такие
 бумаги исключаются из бэктеста с явным сообщением, автоматическая
 корректировка не выполняется.
+
+Исключение — подтверждённые рыночные события: даты реальных обвалов,
+которые человек проверил и внёс в конфиг (например, 24.02.2022 — начало
+СВО). Скачок в такую дату — не сплит и не битые данные, бумага остаётся
+в бэктесте. Событие в любую другую дату по-прежнему исключает бумагу.
 """
 
 from __future__ import annotations
@@ -28,6 +33,8 @@ class ValidationReport:
     negative_volume: int = 0
     zero_price: int = 0
     price_jumps: list[tuple[str, float]] = field(default_factory=list)  # (дата, изменение)
+    confirmed_jumps: list[tuple[str, float, str]] = field(default_factory=list)
+    #                ^ (дата, изменение, причина) — подтверждённые события
     suspicious: bool = False     # исключить из бэктеста
 
     @property
@@ -58,9 +65,23 @@ class ValidationReport:
         if self.price_jumps:
             jumps = ", ".join(f"{d}: {chg:+.0%}" for d, chg in self.price_jumps[:5])
             parts.append(f"скачков цены: {len(self.price_jumps)} ({jumps})")
+        if self.confirmed_jumps:
+            events = ", ".join(
+                f"{d}: {chg:+.0%} — {reason}"
+                for d, chg, reason in self.confirmed_jumps[:3]
+            )
+            parts.append(f"подтверждённых событий: {len(self.confirmed_jumps)} ({events})")
         status = "ПОДОЗРИТЕЛЬНА, исключена из бэктеста" if self.suspicious else "ок"
         detail = "; ".join(parts) if parts else "аномалий нет"
         return f"{self.secid}: {self.n_rows} дней, {detail} — {status}"
+
+
+def _confirmed_reason(day_iso: str, secid: str, confirmed_events) -> str | None:
+    """Причина подтверждённого события на дату, если оно покрывает бумагу."""
+    for event in confirmed_events or []:
+        if event.date == day_iso and (not event.tickers or secid in event.tickers):
+            return event.reason
+    return None
 
 
 def validate_candles(
@@ -68,6 +89,7 @@ def validate_candles(
     secid: str,
     jump_threshold: float = 0.35,
     trading_calendar: set | None = None,
+    confirmed_events=None,
 ) -> ValidationReport:
     """Проверяет дневные свечи одной бумаги.
 
@@ -75,6 +97,9 @@ def validate_candles(
     (объединение дат по всем бумагам универсума). Если не передан,
     пропущенные дни не считаются: у самой бумаги нет способа отличить
     выходной от дыры в данных.
+
+    ``confirmed_events`` — список подтверждённых человеком рыночных событий
+    (объекты с полями date, reason, tickers — см. settings.ConfirmedEvent).
     """
     report = ValidationReport(secid=secid, n_rows=len(df))
     if df.empty:
@@ -99,11 +124,17 @@ def validate_candles(
     )
 
     # Детектор сплитов/консолидаций: скачок close-to-close больше порога.
+    # Скачок в дату подтверждённого события — реальный обвал, не аномалия.
     ordered = df.sort_values("date")
     changes = ordered["close"].pct_change()
     for idx in changes.index[changes.abs() > jump_threshold]:
         day = pd.to_datetime(ordered.loc[idx, "date"]).date().isoformat()
-        report.price_jumps.append((day, float(changes.loc[idx])))
+        change = float(changes.loc[idx])
+        reason = _confirmed_reason(day, secid, confirmed_events)
+        if reason:
+            report.confirmed_jumps.append((day, change, reason))
+        else:
+            report.price_jumps.append((day, change))
     if report.price_jumps:
         report.suspicious = True
 

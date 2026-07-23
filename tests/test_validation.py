@@ -95,3 +95,75 @@ def test_empty_data_reported():
     report = validate_candles(pd.DataFrame(), "PLZL")
     assert report.n_rows == 0
     assert "данных нет" in report.describe_ru()
+
+
+class TestConfirmedEvents:
+    """Подтверждённые человеком рыночные события — не аномалии."""
+
+    def event(self, **overrides):
+        from trading.settings import ConfirmedEvent
+
+        defaults = dict(
+            date="2024-01-11",
+            reason="Тестовый обвал рынка",
+            tickers=None,
+        )
+        defaults.update(overrides)
+        return ConfirmedEvent(**defaults)
+
+    def crash_df(self):
+        return make_candles(close=[101.0, 102.0, 60.0, 61.0])  # −41% за день
+
+    def test_confirmed_crash_is_not_suspicious(self):
+        report = validate_candles(
+            self.crash_df(), "SBER", jump_threshold=0.35,
+            confirmed_events=[self.event()],
+        )
+        assert not report.suspicious
+        assert report.price_jumps == []
+        assert len(report.confirmed_jumps) == 1
+        day, change, reason = report.confirmed_jumps[0]
+        assert day == "2024-01-11"
+        assert "Тестовый обвал" in reason
+        assert "подтверждённых событий" in report.describe_ru()
+        assert "ок" in report.describe_ru()
+
+    def test_jump_on_other_date_still_suspicious(self):
+        report = validate_candles(
+            self.crash_df(), "SBER", jump_threshold=0.35,
+            confirmed_events=[self.event(date="2020-03-10")],  # другая дата
+        )
+        assert report.suspicious
+
+    def test_ticker_scoped_event(self):
+        event = self.event(tickers=["AFKS"])
+        for secid, should_be_suspicious in [("AFKS", False), ("SBER", True)]:
+            report = validate_candles(
+                self.crash_df(), secid, jump_threshold=0.35,
+                confirmed_events=[event],
+            )
+            assert report.suspicious == should_be_suspicious, secid
+
+    def test_settings_yaml_contains_svo_event(self):
+        """Событие 24.02.2022 подтверждено заказчиком и лежит в конфиге."""
+        from trading.settings import load_settings
+
+        events = load_settings().data.confirmed_events
+        assert any(e.date == "2022-02-24" for e in events)
+        svo = next(e for e in events if e.date == "2022-02-24")
+        assert svo.tickers is None      # действует на весь рынок
+        assert "СВО" in svo.reason
+
+    def test_malformed_event_date_rejected(self, tmp_path):
+        import yaml
+
+        from trading.settings import ConfigError, DEFAULT_SETTINGS_PATH, load_settings
+
+        raw = yaml.safe_load(DEFAULT_SETTINGS_PATH.read_text(encoding="utf-8"))
+        raw["данные"]["подтверждённые_события"] = [
+            {"дата": "24.02.2022", "причина": "неверный формат даты"}
+        ]
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+        with pytest.raises(ConfigError, match="ГГГГ-ММ-ДД"):
+            load_settings(bad)

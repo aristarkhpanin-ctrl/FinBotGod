@@ -9,11 +9,12 @@ pydantic: опечатка, лишний ключ или значение вне
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFAULT_SETTINGS_PATH = Path(__file__).parent / "config" / "settings.yaml"
 DEFAULT_UNIVERSE_PATH = Path(__file__).parent / "config" / "universe.yaml"
@@ -59,6 +60,26 @@ class BenchmarkConfig(_Section):
     infra_cost_rub_year: float = Field(alias="инфраструктура_руб_год", ge=0)
 
 
+class ConfirmedEvent(_Section):
+    """Рыночное событие, подтверждённое человеком: скачок цены в эту дату —
+    не сплит и не аномалия данных, бумага не исключается из бэктеста."""
+
+    date: str = Field(alias="дата")
+    reason: str = Field(alias="причина")
+    tickers: list[str] | None = Field(alias="тикеры", default=None)
+
+    @field_validator("date")
+    @classmethod
+    def _date_is_iso(cls, v: str) -> str:
+        try:
+            date.fromisoformat(v)
+        except ValueError:
+            raise ValueError(
+                f"дата события должна быть в формате ГГГГ-ММ-ДД, получено {v!r}"
+            )
+        return v
+
+
 class DataConfig(_Section):
     cache_dir: str = Field(alias="каталог_кэша")
     history_start: str = Field(alias="начало_истории")
@@ -66,6 +87,9 @@ class DataConfig(_Section):
     timeout_seconds: float = Field(alias="таймаут_секунд", gt=0)
     retries: int = Field(alias="число_ретраев", ge=0)
     price_jump_threshold: float = Field(alias="порог_скачка_цены", gt=0)
+    confirmed_events: list[ConfirmedEvent] = Field(
+        alias="подтверждённые_события", default_factory=list
+    )
 
 
 class MlConfig(_Section):
