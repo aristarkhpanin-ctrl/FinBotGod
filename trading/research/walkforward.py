@@ -206,7 +206,7 @@ class WalkForwardRunner:
                 out[secid] = d
         return out
 
-    def _run_engine(self, candles, params, capital, tag) -> "BacktestResult":
+    def _run_engine(self, candles, params, capital, tag, trade_from) -> "BacktestResult":
         settings = self.settings.model_copy(deep=True)
         settings.capital.start_amount = capital
         engine = BacktestEngine(
@@ -217,6 +217,7 @@ class WalkForwardRunner:
             ledger=self.ledger,
             data_hash=f"{self.data_hash}|{tag}",
             source=self.source,
+            trade_from=trade_from,
             **self.engine_kwargs,
         )
         return engine.run()
@@ -244,9 +245,13 @@ class WalkForwardRunner:
         combo_factors: dict[str, list[float]] = {self._key(c): [] for c in self.combos}
         combo_days: dict[str, float] = {self._key(c): 0.0 for c in self.combos}
 
+        history_start = min(df["date"].min() for df in self.candles.values())
         for w in windows:
-            train = self._slice(w.train_start, w.train_end)
-            test = self._slice(w.test_start, w.test_end)
+            # Данные ДО окна — это прошлое, стратегия его знает (для разогрева
+            # индикаторов); торговля и метрики — строго внутри окна через
+            # trade_from. Будущее отрезано концом среза.
+            train = self._slice(history_start, w.train_end)
+            test = self._slice(history_start, w.test_end)
             if not train or not test:
                 limitations.append(f"Окно «{w.label}» пропущено: нет данных.")
                 continue
@@ -256,7 +261,7 @@ class WalkForwardRunner:
             for params in self.combos:
                 r = self._run_engine(
                     train, params, s.capital.start_amount,
-                    f"train|{w.label}",
+                    f"train|{w.label}", trade_from=str(w.train_start.date()),
                 )
                 metric = r.metrics.get(self.select_metric)
                 if metric is None or (isinstance(metric, float) and math.isnan(metric)):
@@ -268,7 +273,7 @@ class WalkForwardRunner:
             for params in self.combos:
                 r = self._run_engine(
                     test, params, s.capital.start_amount,
-                    f"test|{w.label}",
+                    f"test|{w.label}", trade_from=str(w.test_start.date()),
                 )
                 key = self._key(params)
                 combo_factors[key].append(
@@ -279,7 +284,8 @@ class WalkForwardRunner:
             # 3. Выбранная конфигурация на проверке с переносом капитала —
             #    непрерывная OOS-кривая.
             chosen = self._run_engine(
-                test, best_params, carried_capital, f"oos|{w.label}"
+                test, best_params, carried_capital, f"oos|{w.label}",
+                trade_from=str(w.test_start.date()),
             )
             carried_capital = float(chosen.equity.iloc[-1])
             oos_segments.append(chosen.equity)
