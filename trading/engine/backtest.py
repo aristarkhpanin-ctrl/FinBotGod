@@ -59,6 +59,7 @@ class BacktestResult:
     guard_events: list[str]      # сработавшие предохранители
     halted_reason: str | None    # система остановлена предохранителем
     report_ru: str = ""
+    monthly_report_ru: str = ""
 
 
 class BacktestEngine:
@@ -74,6 +75,7 @@ class BacktestEngine:
         signal_shift_days: int = 0,
         source: str = "человек",
         whitelist: list[str] | None = None,
+        journal=None,               # DecisionJournal — файлы decisions.log/events.jsonl
     ):
         if ledger is None:
             raise ValueError(
@@ -86,6 +88,7 @@ class BacktestEngine:
         self.imoex_close = imoex_close
         self.signal_shift = int(signal_shift_days)
         self.source = source
+        self.journal = journal
         self.lot_sizes = lot_sizes
         self.cost_model = CostModel(settings.costs)
 
@@ -178,6 +181,8 @@ class BacktestEngine:
         guard_events: list[str] = []
         halted_reason: str | None = None
         equity_values: list[float] = []
+        decisions_flushed = 0          # сколько решений уже ушло в журнал
+        costs_flushed = 0.0            # издержки, учтённые в прошлых сводках
         for i, day in enumerate(self.dates):
             trading_allowed = (
                 halted_reason is None
@@ -213,6 +218,27 @@ class BacktestEngine:
                 if verdict:
                     guard_events.append(f"{day.date()}  {verdict}")
                     decisions.append(f"{day.date().isoformat()}  {verdict}")
+            # Журнал: решения дня + обязательная ежедневная сводка.
+            if self.journal is not None:
+                for text in decisions[decisions_flushed:]:
+                    self.journal.log_decision(text, тип="решение")
+                decisions_flushed = len(decisions)
+                prev_equity = (
+                    equity_values[-2] if len(equity_values) > 1
+                    else s.capital.start_amount
+                )
+                self.journal.daily_summary(
+                    day=day.date(),
+                    equity=equity_value,
+                    prev_equity=prev_equity,
+                    costs_today=portfolio.total_costs_paid - costs_flushed,
+                    costs_total=portfolio.total_costs_paid,
+                    start_capital=s.capital.start_amount,
+                    risk_free_rate=s.benchmark.risk_free_rate,
+                    n_positions=len(portfolio.positions),
+                    max_positions=s.risk.max_positions,
+                )
+                costs_flushed = portfolio.total_costs_paid
 
         equity = pd.Series(equity_values, index=self.dates, name="equity")
         metrics = compute_metrics(
@@ -260,9 +286,16 @@ class BacktestEngine:
             run_hash=run_hash, guard_events=guard_events,
             halted_reason=halted_reason,
         )
+        from trading.reporting.human_log import monthly_report
         from trading.reporting.report import full_report_ru
 
         result.report_ru = full_report_ru(s, result)
+        monthly_text, monthly_table = monthly_report(
+            equity, execution.fills, s.benchmark.risk_free_rate, guard_events
+        )
+        result.monthly_report_ru = monthly_text
+        if self.journal is not None:
+            self.journal.write_monthly_csv(monthly_table)
         return result
 
     # ---------- Ликвидация по предохранителю ----------
