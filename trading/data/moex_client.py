@@ -137,18 +137,30 @@ class MoexClient:
             raise MoexApiError("В ответе ISS нет поля LOTSIZE — проверить эндпоинт")
         return df
 
-    def daily_candles(self, secid: str, date_from: str, date_till: str) -> pd.DataFrame:
-        """Дневные свечи (interval=24) за диапазон дат, все страницы."""
+    def _candles(self, path: str, date_from: str, date_till: str) -> pd.DataFrame:
         df = self._paginated(
-            f"{BOARD_PATH}/securities/{secid}/candles.json",
-            {"from": date_from, "till": date_till, "interval": 24},
-            "candles",
+            path, {"from": date_from, "till": date_till, "interval": 24}, "candles"
         )
         if df.empty:
             return df
         df["date"] = pd.to_datetime(df["begin"]).dt.normalize()
         df = df[["date", "open", "high", "low", "close", "value", "volume"]]
         return df.sort_values("date").reset_index(drop=True)
+
+    def daily_candles(self, secid: str, date_from: str, date_till: str) -> pd.DataFrame:
+        """Дневные свечи (interval=24) за диапазон дат, все страницы."""
+        return self._candles(
+            f"{BOARD_PATH}/securities/{secid}/candles.json", date_from, date_till
+        )
+
+    def index_candles(
+        self, date_from: str, date_till: str, index_id: str = "IMOEX"
+    ) -> pd.DataFrame:
+        """Дневные свечи индекса (режим SNDX) — для бенчмарка «купил и держи»."""
+        return self._candles(
+            f"/engines/stock/markets/index/boards/SNDX/securities/{index_id}/candles.json",
+            date_from, date_till,
+        )
 
     def trade_history(self, secid: str, date_from: str, date_till: str) -> pd.DataFrame:
         """Историческая статистика торгов (объёмы, число сделок) — ликвидность."""
@@ -197,6 +209,16 @@ class MarketData:
         if self._cache.has(key):
             return self._cache.load(key)
         df = self._client.index_composition(date, index_id)
+        self._cache.save(key, df)
+        return df
+
+    def index_candles(
+        self, date_from: str, date_till: str, index_id: str = "IMOEX"
+    ) -> pd.DataFrame:
+        key = f"index_candles/{index_id}_{date_from}_{date_till}"
+        if self._cache.has(key):
+            return self._cache.load(key)
+        df = self._client.index_candles(date_from, date_till, index_id)
         self._cache.save(key, df)
         return df
 

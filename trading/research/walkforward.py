@@ -169,6 +169,7 @@ class WalkForwardRunner:
         test_years: int = 1,
         select_metric: str = "annual_return",
         safety_margin: float = 0.10,
+        source: str = "перебор",     # источник гипотезы: человек | llm | перебор
     ):
         self.combos = expand_grid(param_grid)   # проверка лимита — сразу
         self.candles = {}
@@ -189,6 +190,7 @@ class WalkForwardRunner:
         self.test_years = test_years
         self.select_metric = select_metric
         self.safety_margin = safety_margin
+        self.source = source
 
         all_dates = pd.concat([d["date"] for d in self.candles.values()])
         self.first_year = int(all_dates.min().year)
@@ -212,7 +214,7 @@ class WalkForwardRunner:
             strategy=self.strategy_factory(**params),
             ledger=self.ledger,
             data_hash=f"{self.data_hash}|{tag}",
-            source="перебор",
+            source=self.source,
         )
         return engine.run()
 
