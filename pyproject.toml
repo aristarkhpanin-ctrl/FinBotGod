@@ -16,6 +16,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Часть II (ТЗ, раздел 25). Ставятся, но в торговом контуре при
+# ml.enabled: false не импортируются. torch и hmmlearn — для ступени 3
+# и детекции режимов, ставятся позже, по мере надобности.
+ml = [
+    "scikit-learn>=1.4",   # базовые модели, метрики, пайплайны
+    "statsmodels>=0.14",   # тесты стационарности (Дики — Фуллер)
+    "scipy>=1.11",         # статистика (дефлированный Шарп, KS-тест)
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
