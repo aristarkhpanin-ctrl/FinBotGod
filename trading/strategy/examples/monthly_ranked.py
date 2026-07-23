@@ -27,13 +27,17 @@ class _MonthlyRanked:
 
     direction = +1
 
-    def __init__(self, lookback: int, top_n: int):
+    def __init__(self, lookback: int, top_n: int, rebalance: str = "month"):
         if lookback < 2:
-            raise ValueError("lookback должен быть не меньше 2 дней")
+            raise ValueError("lookback должен быть не меньше 2 баров")
         if top_n < 1:
             raise ValueError("top_n должен быть не меньше 1")
+        if rebalance not in ("month", "bar"):
+            raise ValueError("rebalance: 'month' (раз в календарный месяц) "
+                             "или 'bar' (каждый бар — для старших таймфреймов)")
         self.lookback = lookback
         self.top_n = top_n
+        self.rebalance = rebalance
         self._last_month: tuple[int, int] | None = None
         self._weights: dict[str, float] = {}
 
@@ -47,10 +51,13 @@ class _MonthlyRanked:
         if not data_until_t:
             return {}
         t = max(df["date"].iloc[-1] for df in data_until_t.values())
-        month = (t.year, t.month)
-        if month == self._last_month:
-            return self._weights
-        self._last_month = month
+        # На старших таймфреймах (bar) ребалансируем каждый бар: бар и есть
+        # шаг таймфрейма. На дневных данных (month) — раз в календарный месяц.
+        if self.rebalance == "month":
+            month = (t.year, t.month)
+            if month == self._last_month:
+                return self._weights
+            self._last_month = month
 
         returns: dict[str, float] = {}
         for secid, df in data_until_t.items():

@@ -162,6 +162,19 @@ class MoexClient:
             date_from, date_till,
         )
 
+    def fx_candles(
+        self, date_from: str, date_till: str, secid: str = "USD000UTSTOM"
+    ) -> pd.DataFrame:
+        """Дневные свечи валютной пары (рынок selt, борд CETS).
+
+        USD000UTSTOM — доллар/рубль с расчётами «завтра». Межрыночный
+        сигнал: слабеющий рубль поднимает рублёвую выручку экспортёров.
+        """
+        return self._candles(
+            f"/engines/currency/markets/selt/boards/CETS/securities/{secid}/candles.json",
+            date_from, date_till,
+        )
+
     def trade_history(self, secid: str, date_from: str, date_till: str) -> pd.DataFrame:
         """Историческая статистика торгов (объёмы, число сделок) — ликвидность."""
         return self._paginated(
@@ -219,6 +232,16 @@ class MarketData:
         if self._cache.has(key):
             return self._cache.load(key)
         df = self._client.index_candles(date_from, date_till, index_id)
+        self._cache.save(key, df)
+        return df
+
+    def fx_candles(
+        self, date_from: str, date_till: str, secid: str = "USD000UTSTOM"
+    ) -> pd.DataFrame:
+        key = f"fx/{secid}_{date_from}_{date_till}"
+        if self._cache.has(key):
+            return self._cache.load(key)
+        df = self._client.fx_candles(date_from, date_till, secid)
         self._cache.save(key, df)
         return df
 
