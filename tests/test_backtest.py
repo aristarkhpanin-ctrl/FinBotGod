@@ -205,6 +205,27 @@ class TestLedgerIntegration:
             )
 
 
+class TestTradeFrom:
+    def test_no_trades_before_trade_from(self, tmp_path):
+        """Разогрев: сигналы по всей истории, сделки — только с даты старта."""
+        candles = flat_candles(10)
+        start = candles["date"].iloc[6]
+        result = BacktestEngine(
+            candles={"TEST": candles},
+            lot_sizes={"TEST": 10},
+            settings=load_settings(),
+            strategy=BuyAndHold("TEST", 0.25),
+            ledger=HypothesisLedger(tmp_path / "ledger.sqlite"),
+            data_hash="тест",
+            trade_from=start.isoformat(),
+        ).run()
+        assert all(pd.Timestamp(f.day) >= start for f in result.fills)
+        assert len(result.fills) == 1
+        # Метрики считаются с даты старта, разогрев не разбавляет доходность.
+        assert result.equity.index[0] == start
+        assert len(result.equity) == 4
+
+
 class TestTimeDiscipline:
     def test_strategy_never_sees_future(self, tmp_path):
         """Архитектурная проверка: срез данных стратегии кончается днём T."""

@@ -76,6 +76,10 @@ class BacktestEngine:
         source: str = "человек",
         whitelist: list[str] | None = None,
         journal=None,               # DecisionJournal — файлы decisions.log/events.jsonl
+        trade_from: str | None = None,
+        # trade_from: сделки только с этой даты; данные ДО неё стратегия
+        # видит (это прошлое — для расчёта сигналов), но не торгует.
+        # Метрики считаются с trade_from: разогрев не разбавляет доходность.
     ):
         if ledger is None:
             raise ValueError(
@@ -89,6 +93,7 @@ class BacktestEngine:
         self.signal_shift = int(signal_shift_days)
         self.source = source
         self.journal = journal
+        self.trade_from = pd.Timestamp(trade_from) if trade_from else None
         self.lot_sizes = lot_sizes
         self.cost_model = CostModel(settings.costs)
 
@@ -189,6 +194,8 @@ class BacktestEngine:
                 and not (self.guards.halted_forever and
                          self.guards.liquidation_pending is None)
             )
+            if self.trade_from is not None and day < self.trade_from:
+                trading_allowed = False   # разогрев: сигналы есть, сделок нет
             if i >= 1 and trading_allowed:
                 self.guards.new_day(day.date())
                 try:
@@ -241,10 +248,12 @@ class BacktestEngine:
                 costs_flushed = portfolio.total_costs_paid
 
         equity = pd.Series(equity_values, index=self.dates, name="equity")
+        if self.trade_from is not None:
+            equity = equity[equity.index >= self.trade_from]
         metrics = compute_metrics(
             equity, s.benchmark.risk_free_rate, fills=execution.fills
         )
-        days_span = (self.dates[-1] - self.dates[0]).days
+        days_span = (equity.index[-1] - equity.index[0]).days
         benchmarks = {
             "денежный_рынок": money_market_benchmark(
                 s.capital.start_amount, days_span, s.benchmark.risk_free_rate
