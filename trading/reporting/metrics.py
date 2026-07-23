@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
 TRADING_DAYS_PER_YEAR = 252
@@ -118,6 +119,82 @@ def compute_metrics(
             }
         )
     return metrics
+
+
+def per_period_sharpe(returns) -> float:
+    """Шарп за период (без годовой нормировки) — для дефлированного Шарпа."""
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    if len(r) < 3:
+        return float("nan")
+    sd = r.std(ddof=1)
+    return float(r.mean() / sd) if sd > 0 else float("nan")
+
+
+def probabilistic_sharpe_ratio(returns, sr_star: float = 0.0) -> float:
+    """PSR: вероятность, что истинный Шарп превышает порог sr_star.
+
+    Учитывает длину ряда, асимметрию и «тяжёлые хвосты» распределения
+    доходностей (все — по периодной, не годовой, доходности).
+    """
+    from scipy.stats import kurtosis, norm, skew
+
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    T = len(r)
+    if T < 3 or r.std(ddof=1) == 0:
+        return float("nan")
+    sr = r.mean() / r.std(ddof=1)
+    sk = float(skew(r))
+    ku = float(kurtosis(r, fisher=False))   # обычный эксцесс (норма = 3)
+    denom = math.sqrt(max(1 - sk * sr + (ku - 1) / 4 * sr ** 2, 1e-12))
+    return float(norm.cdf((sr - sr_star) * math.sqrt(T - 1) / denom))
+
+
+def expected_max_sharpe(sharpe_std: float, n_trials: int) -> float:
+    """Ожидаемый максимум Шарпа при N испытаниях под нулевой гипотезой.
+
+    Из N случайных стратегий лучшая покажет положительный Шарп просто по
+    статистике экстремумов; эта величина — та планка, которую надо побить.
+    """
+    from scipy.stats import norm
+
+    if n_trials < 2 or not (sharpe_std > 0):
+        return 0.0
+    gamma = 0.5772156649015329   # постоянная Эйлера — Маскерони
+    z1 = norm.ppf(1 - 1.0 / n_trials)
+    z2 = norm.ppf(1 - 1.0 / (n_trials * math.e))
+    return float(sharpe_std * ((1 - gamma) * z1 + gamma * z2))
+
+
+def deflated_sharpe_ratio(best_returns, trial_sharpes) -> dict:
+    """Дефлированный Шарп (ТЗ, раздел 16).
+
+    ``best_returns`` — периодные доходности выбранной (лучшей) стратегии;
+    ``trial_sharpes`` — периодные Шарпы ВСЕХ испытанных конфигураций.
+    DSR = вероятность, что истинный Шарп лучшей стратегии положителен
+    после поправки на число испытаний и негауссовость.
+    """
+    trials = np.asarray(trial_sharpes, dtype=float)
+    trials = trials[~np.isnan(trials)]
+    n = len(trials)
+    sr_star = expected_max_sharpe(trials.std(ddof=1), n) if n > 1 else 0.0
+    dsr = probabilistic_sharpe_ratio(best_returns, sr_star)
+    passed = not math.isnan(dsr) and dsr > 0.95
+    return {
+        "deflated_sharpe": dsr,
+        "expected_max_sharpe_null": sr_star,
+        "n_trials": n,
+        "verdict_ru": (
+            f"Испытаний: {n}. Дефлированный Шарп: "
+            + ("н/д (мало данных)." if math.isnan(dsr) else f"{dsr:.2f}. ")
+            + ("" if math.isnan(dsr) else
+               ("Вероятность случайного результата НИЗКАЯ — гипотеза устойчива."
+                if passed else
+                "Вероятность, что результат получен случайно, ВЫСОКАЯ. "
+                "Вывод: гипотеза НЕ подтверждена."))
+        ),
+    }
 
 
 def money_market_benchmark(start_capital: float, days: float, rate: float) -> dict:
