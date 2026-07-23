@@ -52,13 +52,14 @@ def test_all_stub_modules_importable():
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: __import__("trading.ml.labeling", fromlist=["x"]).triple_barrier_labels(),
-        lambda: __import__("trading.ml.validation", fromlist=["x"]).purged_kfold(),
-        lambda: __import__("trading.features.transforms", fromlist=["x"]).fractional_differentiation(),
         lambda: __import__("trading.research.llm", fromlist=["x"]).generate_hypotheses(),
+        lambda: __import__("trading.research.llm", fromlist=["x"]).text_to_features(),
     ],
 )
 def test_stubs_refuse_to_pretend_they_work(call):
+    """Ещё не реализованные модули честно отказываются работать.
+
+    По мере реализации Части II строки отсюда переезжают в свои тесты."""
     with pytest.raises(NotImplementedError):
         call()
 
