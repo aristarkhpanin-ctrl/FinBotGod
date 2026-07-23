@@ -52,7 +52,6 @@ def test_all_stub_modules_importable():
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: __import__("trading.core.sizing", fromlist=["x"]).size_position(),
         lambda: __import__("trading.ml.labeling", fromlist=["x"]).triple_barrier_labels(),
         lambda: __import__("trading.ml.validation", fromlist=["x"]).purged_kfold(),
         lambda: __import__("trading.features.transforms", fromlist=["x"]).fractional_differentiation(),
