@@ -110,6 +110,10 @@ class Portfolio:
             raise PortfolioError(f"Продажа {secid}: число акций должно быть > 0")
         pos = self.positions.get(secid)
         held = pos.shares if pos else 0
+        # Float-пыль при дробных лотах (крипта): продажа чуть больше остатка
+        # из-за погрешности — это закрытие лонга, а не открытие шорта.
+        if held > 0 and 0 < shares - held <= held * 1e-6:
+            shares = held
         short_part = shares - max(held, 0)
         if short_part > 0 and not self.allow_short:
             raise PortfolioError(

@@ -351,7 +351,7 @@ class BacktestEngine:
             lot = self.lot_sizes.get(secid, 1)
             if side == "buy":
                 # Закрытие шорта требует денег — при нехватке частично.
-                lots = shares // lot
+                lots = int(round(shares / lot))
                 while lots > 0:
                     order_value = lots * lot * price
                     try:
@@ -434,7 +434,9 @@ class BacktestEngine:
                 if weight else 0.0
             )
             lot_cost = price * lot
-            held_lots = int(held_shares / lot)   # знак сохраняется (шорт < 0)
+            held_lots = int(round(held_shares / lot))   # знак сохраняется (шорт < 0)
+            # round, а не int: при дробном размере лота (крипта) деление
+            # lots*lot/lot даёт float-погрешность (2.9999… вместо 3).
             raw = pv * weight_capped / lot_cost if weight_capped else 0.0
             # Новая позиция — усечение к нулю, т.е. floor по модулю (ТЗ, раздел 6).
             # Корректировка существующей — к ближайшему лоту: иначе издержки чуть
@@ -524,6 +526,15 @@ class BacktestEngine:
                 # Покупка: закрытие шорта и/или открытие (наращивание) лонга.
                 lots = delta
                 liquidity_note = money_note = False
+                # Прямые ограничители ДО пошагового ужимания: иначе при дробном
+                # размере лота (крипта) цикл мог бы делать миллионы итераций.
+                affordable = int(portfolio.cash / lot_cost) + 1
+                if affordable < lots:
+                    lots, money_note = affordable, True
+                if self.cost_model.cfg.adv_reject_share > 0:
+                    by_liquidity = int(adv * self.cost_model.cfg.adv_reject_share / lot_cost)
+                    if by_liquidity < lots:
+                        lots, liquidity_note = by_liquidity, True
                 while lots > 0:
                     order_value = lots * lot_cost
                     try:

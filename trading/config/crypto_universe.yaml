@@ -1,0 +1,33 @@
+# Криптоуниверсум (пары Bitfinex к доллару).
+# ВНИМАНИЕ О ВЫЖИВАЕМОСТИ: это пары, торгуемые на Bitfinex в 2026 году.
+# Тысячи монет ICO-эпохи обнулились и делистингованы — их здесь нет.
+# Это завышает результат: тест идёт только по выжившим. Ограничение
+# фиксируется в отчёте явным текстом.
+
+тикеры:
+  - tBTCUSD
+  - tETHUSD
+  - tLTCUSD
+  - tXRPUSD
+  - tEOSUSD
+  - tXMRUSD
+  - tDSHUSD
+  - tZECUSD
+  - tETCUSD
+  - tNEOUSD
+  - tIOTUSD
+  - tTRXUSD
+  - tOMGUSD
+  - tXLMUSD
+  - tXTZUSD
+  - tBTGUSD
+  - tVETUSD
+  - tADAUSD
+  - tDOTUSD
+  - tLINK:USD
+  - tSOLUSD
+  - tDOGE:USD
+  - tUNIUSD
+  - tAVAX:USD
+  - tFILUSD
+  - tAAVE:USD

@@ -143,8 +143,12 @@ def load_settings(path: str | Path = DEFAULT_SETTINGS_PATH) -> Settings:
         raise ConfigError(_explain_validation_error(e)) from e
 
 
-def load_universe(path: str | Path = DEFAULT_UNIVERSE_PATH) -> list[str]:
-    """Читает белый список тикеров из universe.yaml."""
+def load_universe(path: str | Path = DEFAULT_UNIVERSE_PATH,
+                  uppercase: bool = True) -> list[str]:
+    """Читает белый список тикеров из universe.yaml.
+
+    ``uppercase`` — приводить ли к верхнему регистру (для Мосбиржи да;
+    тикеры Bitfinex регистрозависимы, там uppercase=False)."""
     path = Path(path)
     if not path.exists():
         raise ConfigError(f"Файл универсума не найден: {path}")
@@ -152,7 +156,8 @@ def load_universe(path: str | Path = DEFAULT_UNIVERSE_PATH) -> list[str]:
     tickers = raw.get("тикеры") if isinstance(raw, dict) else None
     if not tickers or not isinstance(tickers, list):
         raise ConfigError(f"В файле {path} нет списка «тикеры».")
-    cleaned = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    cleaned = [(str(t).strip().upper() if uppercase else str(t).strip())
+               for t in tickers if str(t).strip()]
     if len(cleaned) != len(set(cleaned)):
         dupes = sorted({t for t in cleaned if cleaned.count(t) > 1})
         raise ConfigError(f"В универсуме дублируются тикеры: {', '.join(dupes)}")
