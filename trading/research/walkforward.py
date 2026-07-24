@@ -208,7 +208,13 @@ class WalkForwardRunner:
 
     def _run_engine(self, candles, params, capital, tag, trade_from) -> "BacktestResult":
         settings = self.settings.model_copy(deep=True)
+        # Потолок суммы заявки — абсолютная величина, но капитал между окнами
+        # переносится и может вырасти в разы (крипта 2017). Масштабируем
+        # потолок пропорционально капиталу окна, иначе после сильного окна
+        # он ложно срабатывает на каждой заявке и останавливает систему.
+        scale = capital / self.settings.capital.start_amount
         settings.capital.start_amount = capital
+        settings.risk.max_order_value = self.settings.risk.max_order_value * scale
         engine = BacktestEngine(
             candles=candles,
             lot_sizes=self.lot_sizes,
