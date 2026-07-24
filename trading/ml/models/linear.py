@@ -77,3 +77,63 @@ class LogisticMetaModel:
     def _check_fitted(self) -> None:
         if not self._fitted:
             raise RuntimeError("Модель не обучена — сначала fit().")
+
+
+class CalibratedLogisticModel:
+    """Логистическая модель с КАЛИБРОВКОЙ вероятностей (Platt scaling).
+
+    Зачем: чтобы порог «уверенность ≥ 80%» имел смысл, предсказанная
+    вероятность должна соответствовать реальной частоте. Сырые выходы
+    логистической регрессии на шумных финансовых данных смещены. Калибровка
+    делается на ОТЛОЖЕННОМ по времени хвосте обучающего окна (без утечки
+    из теста): база учится на первых 80% обучения, сигмоида-калибратор — на
+    последних 20%.
+
+    Сохраняет explain() (через базовые коэффициенты) — требование ТЗ.
+    """
+
+    def __init__(self, feature_names: list[str], C: float = 1.0,
+                 calib_fraction: float = 0.2):
+        from sklearn.linear_model import LogisticRegression
+
+        self.feature_names = list(feature_names)
+        self._base = LogisticMetaModel(feature_names, C)
+        self._calibrator = LogisticRegression(max_iter=1000)
+        self._calib_fraction = calib_fraction
+        self._fitted = False
+
+    def fit(self, X, y, sample_weight=None) -> None:
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y).astype(int)
+        n = len(X)
+        k = max(int(n * (1 - self._calib_fraction)), 10)
+        if k >= n or len(np.unique(y[:k])) < 2 or len(np.unique(y[k:])) < 2:
+            # Данных мало для честной калибровки — учим базу на всём,
+            # калибратор становится тождественным.
+            self._base.fit(X, y, sample_weight)
+            self._identity = True
+            self._fitted = True
+            return
+        self._identity = False
+        sw = None if sample_weight is None else np.asarray(sample_weight)[:k]
+        self._base.fit(X[:k], y[:k], sw)
+        raw = self._base.predict_proba(X[k:])[:, 1].reshape(-1, 1)
+        self._calibrator.fit(raw, y[k:])
+        self._fitted = True
+
+    def predict_proba(self, X) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Модель не обучена — сначала fit().")
+        raw = self._base.predict_proba(X)[:, 1]
+        if getattr(self, "_identity", True):
+            return np.column_stack([1 - raw, raw])
+        cal = self._calibrator.predict_proba(raw.reshape(-1, 1))
+        return cal
+
+    def feature_importance(self) -> dict[str, float]:
+        return self._base.feature_importance()
+
+    def explain(self, x) -> str:
+        base_text = self._base.explain(x)
+        proba = float(self.predict_proba(np.asarray(x, dtype=float).reshape(1, -1))[0, 1])
+        return f"[калиброванная уверенность {proba:.0%}] " + base_text

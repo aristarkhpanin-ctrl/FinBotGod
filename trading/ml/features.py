@@ -44,15 +44,19 @@ def bet_features(
 ) -> dict[str, float]:
     """Признаки одной ставки. Все ряды уже обрезаны по дате входа t."""
     ma50 = stock_close.iloc[-50:].mean() if len(stock_close) >= 50 else np.nan
+    # Признаки самого актива: недостаток истории → nan (актив исключается).
+    # Межрыночные признаки: если ряда на этом рынке НЕТ (None) → нейтральный 0
+    # (отсутствие сигнала — валидное состояние, а не причина пропускать актив);
+    # если ряд есть, но короткий — nan.
     return {
         "mom_20": _mom(stock_close, 20),
         "mom_60": _mom(stock_close, 60),
         "mom_120": _mom(stock_close, 120),
         "vol_20": _vol(stock_close, 20),
         "dist_ma50": (stock_close.iloc[-1] / ma50 - 1) if ma50 and ma50 > 0 else np.nan,
-        "usd_mom_60": _mom(usd_close, 60) if usd_close is not None else np.nan,
-        "imoex_mom_20": _mom(imoex_close, 20) if imoex_close is not None else np.nan,
-        "imoex_vol_20": _vol(imoex_close, 20) if imoex_close is not None else np.nan,
+        "usd_mom_60": _mom(usd_close, 60) if usd_close is not None else 0.0,
+        "imoex_mom_20": _mom(imoex_close, 20) if imoex_close is not None else 0.0,
+        "imoex_vol_20": _vol(imoex_close, 20) if imoex_close is not None else 0.0,
     }
 
 

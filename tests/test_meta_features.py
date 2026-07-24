@@ -24,8 +24,8 @@ class TestFeatures:
 
     def test_short_series_gives_nan_not_crash(self):
         f = bet_features(series([100, 101, 102]), None, None)
-        assert np.isnan(f["mom_120"])
-        assert np.isnan(f["usd_mom_60"])
+        assert np.isnan(f["mom_120"])          # своя история коротка — nan
+        assert f["usd_mom_60"] == 0.0          # межрыночного ряда нет — нейтральный 0
 
     def test_features_frame_canonical_columns(self):
         frame = features_frame([bet_features(series([100 + i for i in range(130)]),
