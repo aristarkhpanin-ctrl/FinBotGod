@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pandas as pd
+
 from trading.data.moex_client import MarketData
 
 
@@ -22,6 +24,29 @@ class UniverseSnapshot:
     tickers: list[str]           # состав индекса на дату ∩ белый список
     from_index: bool             # True — исторический состав получен
     limitation_ru: str | None    # текст ограничения для отчёта, если есть
+
+
+def index_schedule(market: MarketData, start: str, end: str,
+                   index_id: str = "IMOEX", max_probe_days: int = 7) -> pd.Series:
+    """Помесячный график состава индекса: дата среза → множество тикеров.
+
+    Срез берётся в первый торговый день месяца: если на календарную дату
+    биржа вернула пустой состав (выходной/праздник), пробуем следующие дни.
+    Состав IMOEX пересматривается раз в квартал, помесячный шаг ловит
+    каждое изменение с точностью до месяца.
+    """
+    snapshots: dict[pd.Timestamp, frozenset] = {}
+    for month_start in pd.date_range(start, end, freq="MS"):
+        for shift in range(max_probe_days):
+            day = month_start + pd.Timedelta(days=shift)
+            comp = market.index_composition(str(day.date()), index_id)
+            if comp is not None and not comp.empty:
+                col = "ticker" if "ticker" in comp.columns else "secids"
+                snapshots[day] = frozenset(str(t).upper() for t in comp[col].dropna())
+                break
+    if not snapshots:
+        return pd.Series(dtype=object)
+    return pd.Series(snapshots).sort_index()
 
 
 def universe_on_date(

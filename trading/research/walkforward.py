@@ -249,6 +249,8 @@ class WalkForwardRunner:
         limitations: list[str] = []
         oos_segments: list[pd.Series] = []
         oos_fills: list = []
+        # Доходы сверх изменения цен по склейке OOS (в рублях).
+        oos_income = {"cash_interest": 0.0, "dividends_net": 0.0, "dividend_tax": 0.0}
         carried_capital = s.capital.start_amount
         # OOS-результаты каждой конфигурации (фиксированный капитал) —
         # для медианы и лучшей задним числом.
@@ -298,6 +300,8 @@ class WalkForwardRunner:
                 trade_from=str(w.test_start.date()),
             )
             carried_capital = float(chosen.equity.iloc[-1])
+            for k in ("cash_interest", "dividends_net", "dividend_tax"):
+                oos_income[k] += chosen.metrics.get(k, 0.0)
             oos_segments.append(chosen.equity)
             oos_fills.extend(chosen.fills)
             chosen_by_window.append(best_params)
@@ -316,6 +320,7 @@ class WalkForwardRunner:
             oos_equity, s.benchmark.risk_free_rate, fills=oos_fills,
             rf_series=rf_series,
         )
+        oos_metrics.update(oos_income)
         mm_oos_annual = None
         if rf_series is not None:
             from trading.data.rates import money_market_benchmark_series

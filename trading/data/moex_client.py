@@ -154,11 +154,15 @@ class MoexClient:
         )
 
     def index_candles(
-        self, date_from: str, date_till: str, index_id: str = "IMOEX"
+        self, date_from: str, date_till: str, index_id: str = "IMOEX",
+        board: str = "SNDX",
     ) -> pd.DataFrame:
-        """Дневные свечи индекса (режим SNDX) — для бенчмарка «купил и держи»."""
+        """Дневные свечи индекса — для бенчмарка «купил и держи».
+
+        Большинство индексов (IMOEX, MCFTR, RGBITR) — на доске SNDX; индексы
+        полной доходности «нетто» (MCFTRR) — на доске RTSI."""
         return self._candles(
-            f"/engines/stock/markets/index/boards/SNDX/securities/{index_id}/candles.json",
+            f"/engines/stock/markets/index/boards/{board}/securities/{index_id}/candles.json",
             date_from, date_till,
         )
 
@@ -226,12 +230,13 @@ class MarketData:
         return df
 
     def index_candles(
-        self, date_from: str, date_till: str, index_id: str = "IMOEX"
+        self, date_from: str, date_till: str, index_id: str = "IMOEX",
+        board: str = "SNDX",
     ) -> pd.DataFrame:
         key = f"index_candles/{index_id}_{date_from}_{date_till}"
         if self._cache.has(key):
             return self._cache.load(key)
-        df = self._client.index_candles(date_from, date_till, index_id)
+        df = self._client.index_candles(date_from, date_till, index_id, board)
         self._cache.save(key, df)
         return df
 

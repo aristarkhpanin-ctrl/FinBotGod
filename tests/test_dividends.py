@@ -96,6 +96,19 @@ class TestEngineDividends:
         assert result.metrics["dividends_net"] == 0.0
 
 
+def test_unadjusted_for_split_dividend_is_rejected():
+    # Цена после поправки на сплит 1:100 — 200 ₽, а сайт даёт дивиденд
+    # до сплита 1 000 ₽ (500% от цены) — выплату надо отбросить.
+    candles = flat_candles(10, price=200.0)
+    days = candles["date"]
+    ex = pd.DataFrame({"ex_date": [days.iloc[3], days.iloc[6]],
+                       "amount": [1_000.0, 15.0], "record_date": [days.iloc[3]] * 2})
+    from trading.data.dividends import check_dividend_yields
+    kept, rejected = check_dividend_yields(ex, candles)
+    assert kept["amount"].tolist() == [15.0]          # 7,5% — правдоподобно
+    assert len(rejected) == 1 and "500.00%" in rejected[0]
+
+
 def test_short_pays_gross_dividend():
     p = Portfolio(20_000, allow_short=True)
     costs = CostModel(load_settings().costs).trade_costs(5_000, 1e9)

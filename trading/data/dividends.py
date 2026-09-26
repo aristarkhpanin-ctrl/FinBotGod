@@ -171,3 +171,33 @@ def ex_dividend_dates(divs: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.Data
             rows.append((cal[pos], float(amt), rec))
     out = pd.DataFrame(rows, columns=["ex_date", "amount", "record_date"])
     return out.drop_duplicates(["ex_date", "amount"]).reset_index(drop=True)
+
+
+def check_dividend_yields(ex: pd.DataFrame, candles: pd.DataFrame,
+                          low: float = 0.0005, high: float = 0.35
+                          ) -> tuple[pd.DataFrame, list[str]]:
+    """Отсев неправдоподобных выплат по доходности к цене накануне экс-даты.
+
+    ISS отдаёт цены С поправкой на сплиты (GMKN 1:100, VTBR 5000:1), а сайты
+    с дивидендами — часто БЕЗ неё. Тогда «дивиденд» выходит в сотни процентов
+    от цены (или в тысячные доли процента). Такие выплаты отбрасываются —
+    это занижает доход, но не выдумывает его. Список отброшенного — в отчёт.
+    """
+    if ex is None or ex.empty or candles is None or candles.empty:
+        return ex, []
+    c = candles.sort_values("date")
+    dates = pd.to_datetime(c["date"]).values
+    closes = c["close"].values
+    keep, rejected = [], []
+    for row in ex.itertuples():
+        pos = int(np.searchsorted(dates, pd.Timestamp(row.ex_date).to_datetime64())) - 1
+        if pos < 0:
+            keep.append(False)
+            continue
+        ratio = float(row.amount) / float(closes[pos])
+        ok = low <= ratio <= high
+        keep.append(ok)
+        if not ok:
+            rejected.append(f"{pd.Timestamp(row.ex_date).date()} {row.amount:g} ₽ "
+                            f"при цене {closes[pos]:g} ₽ ({ratio:.2%})")
+    return ex[np.array(keep, dtype=bool)].reset_index(drop=True), rejected
