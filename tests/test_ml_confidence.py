@@ -43,6 +43,22 @@ class TestCalibratedModel:
         if high.sum() >= 20:                    # если такие вообще есть
             assert y[high].mean() > 0.6         # калибровка не абсурдна
 
+    def test_calibration_never_inverts_ranking(self):
+        """Если на отложенном хвосте связь развернулась, калибратор получил бы
+        отрицательный наклон и перевернул порядок — такая калибровка отключается."""
+        X, y = separable(n=1000)
+        k = int(1000 * 0.8)
+        y_flipped = y.copy()
+        y_flipped[k:] = 1 - y_flipped[k:]          # хвост обучения «наоборот»
+        m = CalibratedLogisticModel(FEATURE_NAMES)
+        m.fit(X, y_flipped)
+        assert m.calibration_rejected
+        p = m.predict_proba(X[:k])[:, 1]
+        assert np.corrcoef(p, X[:k, 0])[0, 1] > 0   # порядок как у базовой модели
+        # Уровень подогнан под частоту на хвосте (а не 0,5 «сбалансированной» базы).
+        p_tail = m.predict_proba(X[k:])[:, 1]
+        assert p_tail.mean() == pytest.approx(y_flipped[k:].mean(), abs=0.01)
+
     def test_handles_tiny_data_gracefully(self):
         X, y = separable(n=12)
         m = CalibratedLogisticModel(FEATURE_NAMES)

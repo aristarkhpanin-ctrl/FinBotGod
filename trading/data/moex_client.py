@@ -166,6 +166,24 @@ class MoexClient:
             date_from, date_till,
         )
 
+    def index_history(self, index_id: str, date_from: str, date_till: str) -> pd.DataFrame:
+        """Дневные значения индекса из архива итогов торгов (date, close).
+
+        Свечи ISS начинаются для части индексов поздно (MCFTR — с 2016),
+        а архив итогов — с запуска индекса (MCFTR/MCFTRR — с 2003)."""
+        df = self._paginated(
+            f"/history/engines/stock/markets/index/securities/{index_id}.json",
+            {"from": date_from, "till": date_till,
+             "history.columns": "TRADEDATE,CLOSE,BOARDID"},
+            "history",
+        )
+        if df.empty:
+            return pd.DataFrame(columns=["date", "close"])
+        df["date"] = pd.to_datetime(df["TRADEDATE"]).dt.normalize()
+        df = df.rename(columns={"CLOSE": "close"})[["date", "close"]].dropna()
+        df = df[df["close"] > 0].drop_duplicates("date", keep="last")
+        return df.sort_values("date").reset_index(drop=True)
+
     def fx_candles(
         self, date_from: str, date_till: str, secid: str = "USD000UTSTOM"
     ) -> pd.DataFrame:
@@ -237,6 +255,14 @@ class MarketData:
         if self._cache.has(key):
             return self._cache.load(key)
         df = self._client.index_candles(date_from, date_till, index_id, board)
+        self._cache.save(key, df)
+        return df
+
+    def index_history(self, index_id: str, date_from: str, date_till: str) -> pd.DataFrame:
+        key = f"index_history/{index_id}_{date_from}_{date_till}"
+        if self._cache.has(key):
+            return self._cache.load(key)
+        df = self._client.index_history(index_id, date_from, date_till)
         self._cache.save(key, df)
         return df
 

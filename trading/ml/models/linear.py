@@ -55,6 +55,13 @@ class LogisticMetaModel:
         total = coefs.sum() or 1.0
         return dict(zip(self.feature_names, coefs / total))
 
+    def contributions(self, x) -> dict[str, float]:
+        """Вклад каждого признака в логит решения (коэффициент × стандартизованное
+        значение). Знак «+» толкает вероятность вверх."""
+        self._check_fitted()
+        xs = self._scaler.transform(np.asarray(x, dtype=float).reshape(1, -1))[0]
+        return dict(zip(self.feature_names, self._clf.coef_[0] * xs))
+
     def explain(self, x) -> str:
         """Объяснение решения по одному наблюдению — строкой на русском."""
         self._check_fitted()
@@ -101,6 +108,7 @@ class CalibratedLogisticModel:
         self._calibrator = LogisticRegression(max_iter=1000)
         self._calib_fraction = calib_fraction
         self._fitted = False
+        self.calibration_rejected = False   # калибровка отключена: переворачивала порядок
 
     def fit(self, X, y, sample_weight=None) -> None:
         X = np.asarray(X, dtype=float)
@@ -119,7 +127,34 @@ class CalibratedLogisticModel:
         self._base.fit(X[:k], y[:k], sw)
         raw = self._base.predict_proba(X[k:])[:, 1].reshape(-1, 1)
         self._calibrator.fit(raw, y[k:])
+        # Калибровка обязана лишь переводить оценку в частоту, не меняя
+        # порядка. Отрицательный наклон (на отложенном хвосте связь
+        # развернулась) ПЕРЕВОРАЧИВАЕТ ранжирование — модель начинает
+        # называть опасное безопасным. Тогда наклон не используется: остаётся
+        # только сдвиг уровня, при котором средняя вероятность равна
+        # фактической частоте на хвосте (порядок оценок сохраняется).
+        self._shift = None
+        if self._calibrator.coef_[0][0] <= 0:
+            self.calibration_rejected = True
+            self._shift = self._level_shift(raw[:, 0], y[k:].mean())
         self._fitted = True
+
+    @staticmethod
+    def _logit(p: np.ndarray) -> np.ndarray:
+        p = np.clip(p, 1e-9, 1 - 1e-9)
+        return np.log(p / (1 - p))
+
+    def _level_shift(self, raw: np.ndarray, target_rate: float) -> float:
+        """Сдвиг логита b: среднее sigmoid(logit(raw) + b) = target_rate."""
+        z = self._logit(raw)
+        lo, hi = -30.0, 30.0
+        for _ in range(100):                     # бисекция: функция монотонна по b
+            mid = (lo + hi) / 2
+            if (1 / (1 + np.exp(-(z + mid)))).mean() < target_rate:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
 
     def predict_proba(self, X) -> np.ndarray:
         if not self._fitted:
@@ -127,11 +162,16 @@ class CalibratedLogisticModel:
         raw = self._base.predict_proba(X)[:, 1]
         if getattr(self, "_identity", True):
             return np.column_stack([1 - raw, raw])
-        cal = self._calibrator.predict_proba(raw.reshape(-1, 1))
-        return cal
+        if getattr(self, "_shift", None) is not None:
+            p = 1 / (1 + np.exp(-(self._logit(raw) + self._shift)))
+            return np.column_stack([1 - p, p])
+        return self._calibrator.predict_proba(raw.reshape(-1, 1))
 
     def feature_importance(self) -> dict[str, float]:
         return self._base.feature_importance()
+
+    def contributions(self, x) -> dict[str, float]:
+        return self._base.contributions(x)
 
     def explain(self, x) -> str:
         base_text = self._base.explain(x)
