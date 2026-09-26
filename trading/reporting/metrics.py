@@ -52,8 +52,13 @@ def compute_metrics(
     equity: pd.Series,
     risk_free_rate: float,
     fills: list | None = None,
+    rf_series: pd.Series | None = None,
 ) -> dict:
-    """Метрики по кривой стоимости портфеля (индекс — даты, значения — ₽)."""
+    """Метрики по кривой стоимости портфеля (индекс — даты, значения — ₽).
+
+    ``rf_series`` — годовая безрисковая ставка по календарным дням (доля).
+    Если задана, избыточная доходность для Шарпа и Сортино считается по
+    исторической ставке на каждый интервал, а не по постоянной."""
     if len(equity) < 2:
         return {"error": "слишком мало данных для метрик"}
 
@@ -62,8 +67,16 @@ def compute_metrics(
     cagr = annualize(end / start, days)
 
     returns = equity.pct_change().dropna()
-    rf_daily = (1 + risk_free_rate) ** (1 / TRADING_DAYS_PER_YEAR) - 1
-    excess = returns - rf_daily
+    if rf_series is not None and not rf_series.empty:
+        rs = rf_series.sort_index()
+        prev_dates = equity.index[:-1]
+        pos = np.clip(rs.index.searchsorted(prev_dates, side="right") - 1, 0, len(rs) - 1)
+        gaps = np.diff(equity.index.values).astype("timedelta64[D]").astype(float)
+        rf_period = pd.Series(rs.to_numpy()[pos] * gaps / 365.0, index=returns.index)
+        excess = returns - rf_period
+    else:
+        rf_daily = (1 + risk_free_rate) ** (1 / TRADING_DAYS_PER_YEAR) - 1
+        excess = returns - rf_daily
 
     std = float(returns.std(ddof=1))
     sharpe = (

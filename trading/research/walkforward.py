@@ -99,15 +99,18 @@ def expand_grid(param_grid: dict[str, list]) -> list[dict]:
 
 
 def stop_criterion_verdict_ru(
-    oos_annual: float, settings: Settings, safety_margin: float = 0.10
+    oos_annual: float, settings: Settings, safety_margin: float = 0.10,
+    risk_free: float | None = None,
 ) -> str:
     """Критерий остановки проекта (ТЗ, раздел 15) — прямым текстом.
 
     ``safety_margin`` — требуемый запас над порогом безубыточности,
     в процентных пунктах годовых (0.10 = 10 пп).
+    ``risk_free`` — фактическая доходность денежного рынка за проверочный
+    период; если не задана, берётся постоянная ставка из settings.yaml.
     """
-    rf = settings.benchmark.risk_free_rate
-    breakeven = settings.breakeven_rate()
+    rf = settings.benchmark.risk_free_rate if risk_free is None else risk_free
+    breakeven = rf + settings.benchmark.infra_cost_rub_year / settings.capital.start_amount
     required = breakeven + safety_margin
     if oos_annual is None or (isinstance(oos_annual, float) and math.isnan(oos_annual)):
         return "ВЕРДИКТ: OOS-данных недостаточно — выводы делать не по чему."
@@ -153,6 +156,7 @@ class WalkForwardResult:
     verdict_ru: str
     report_ru: str = ""
     limitations: list[str] = field(default_factory=list)
+    mm_oos_annual: float | None = None   # фонд денежного рынка за OOS-период
 
 
 class WalkForwardRunner:
@@ -306,9 +310,19 @@ class WalkForwardRunner:
             raise ValueError("Ни одно окно не дало OOS-результата — данных нет.")
 
         oos_equity = pd.concat(oos_segments)
+        oos_equity = oos_equity[~oos_equity.index.duplicated(keep="last")]
+        rf_series = self.engine_kwargs.get("cash_rate")
         oos_metrics = compute_metrics(
-            oos_equity, s.benchmark.risk_free_rate, fills=oos_fills
+            oos_equity, s.benchmark.risk_free_rate, fills=oos_fills,
+            rf_series=rf_series,
         )
+        mm_oos_annual = None
+        if rf_series is not None:
+            from trading.data.rates import money_market_benchmark_series
+
+            mm_oos_annual = money_market_benchmark_series(
+                1.0, oos_equity.index[0], oos_equity.index[-1], rf_series
+            )["annual_return"]
 
         configs_annual = {
             key: annualize(math.prod(factors), combo_days[key])
@@ -332,7 +346,8 @@ class WalkForwardRunner:
         median_oos = statistics.median(annual_values) if annual_values else float("nan")
 
         verdict = stop_criterion_verdict_ru(
-            oos_metrics.get("annual_return"), s, self.safety_margin
+            oos_metrics.get("annual_return"), s, self.safety_margin,
+            risk_free=mm_oos_annual,
         )
         result = WalkForwardResult(
             windows=windows,
@@ -345,9 +360,15 @@ class WalkForwardRunner:
             median_oos_annual=median_oos,
             verdict_ru=verdict,
             limitations=limitations,
+            mm_oos_annual=mm_oos_annual,
         )
         result.report_ru = self._build_report(result, window_lines)
         return result
+
+    def _breakeven(self, r: WalkForwardResult) -> float:
+        s = self.settings
+        rf = s.benchmark.risk_free_rate if r.mm_oos_annual is None else r.mm_oos_annual
+        return rf + s.benchmark.infra_cost_rub_year / s.capital.start_amount
 
     @staticmethod
     def _key(params: dict) -> str:
@@ -373,8 +394,11 @@ class WalkForwardRunner:
             f"(итог {fmt_rub(m.get('end_equity', 0), 0)} ₽ "
             f"из {fmt_rub(s.capital.start_amount, 0)} ₽)",
             f"  Макс. просадка: {m.get('max_drawdown', float('nan')):.1%} | "
-            f"Шарп (безрисковая {s.benchmark.risk_free_rate:.2%}): "
-            f"{m.get('sharpe', float('nan')):.2f}",
+            + (f"Шарп (безрисковая: ист. ставка ЦБ): " if r.mm_oos_annual is not None
+               else f"Шарп (безрисковая {s.benchmark.risk_free_rate:.2%}): ")
+            + f"{m.get('sharpe', float('nan')):.2f}",
+            *([f"  Фонд денежного рынка за тот же период: {r.mm_oos_annual:.1%} годовых"]
+              if r.mm_oos_annual is not None else []),
             f"  Сделок: {m.get('n_trades', 0)} | "
             f"Издержки: {fmt_rub(m.get('total_costs', 0))} ₽",
             "",
@@ -388,8 +412,9 @@ class WalkForwardRunner:
             "доверять можно медиане, а не максимуму. Эту защиту нельзя отключить.",
             "",
             "КРИТЕРИЙ ОСТАНОВКИ ПРОЕКТА:",
-            f"  Порог безубыточности {s.breakeven_rate():.0%} + запас "
-            f"{self.safety_margin:.0%} = требуется {s.breakeven_rate() + self.safety_margin:.0%}.",
+            f"  Порог безубыточности {self._breakeven(r):.0%} + запас "
+            f"{self.safety_margin:.0%} = требуется "
+            f"{self._breakeven(r) + self.safety_margin:.0%}.",
             f"  {r.verdict_ru}",
         ]
         if r.limitations:

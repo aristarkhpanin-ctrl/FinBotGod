@@ -55,7 +55,13 @@ def full_report_ru(settings: Settings, result) -> str:
     денежного рынка — это выводится ПЕРВЫМ, до всех остальных цифр.
     """
     m = result.metrics
-    rf = settings.benchmark.risk_free_rate
+    mm = result.benchmarks["денежный_рынок"]
+    historical_rf = "source" in mm
+    # Сравниваем с тем, что фонд денежного рынка реально дал за этот период:
+    # по исторической ставке ЦБ, если она задана, иначе — по постоянной.
+    rf = mm["annual_return"] if historical_rf else settings.benchmark.risk_free_rate
+    rf_label = "ист. ставка ЦБ" if historical_rf else f"{rf:.2%}"
+    index_name = result.benchmarks.get("index_name", "IMOEX")
     lines: list[str] = [breakeven_header_ru(settings), ""]
     if getattr(result, "halted_reason", None):
         lines += [
@@ -78,22 +84,22 @@ def full_report_ru(settings: Settings, result) -> str:
         ]
 
     imoex = result.benchmarks.get("IMOEX")
-    mm = result.benchmarks["денежный_рынок"]
     lines += [
         "СРАВНЕНИЕ (годовых):",
         f"  1. Стратегия:              {_pct(strategy_annual)} "
         f"(итог {fmt_rub(m.get('end_equity', 0), 0)} ₽)",
-        f"  2. Купил и держи IMOEX:    "
+        f"  2. Купил и держи {index_name}: "
         + (_pct(imoex["annual_return"]) if imoex else "н/д — данных индекса нет"),
         f"  3. Фонд денежного рынка:   {_pct(mm['annual_return'], 2)} "
-        f"(итог {fmt_rub(mm['end_equity'], 0)} ₽)",
+        f"(итог {fmt_rub(mm['end_equity'], 0)} ₽"
+        + (f", средняя ставка {_pct(mm['average_rate'], 1)})" if historical_rf else ")"),
         "",
         "МЕТРИКИ:",
         f"  Доходность за период:      {_pct(m.get('total_return'))}",
         f"  CAGR:                      {_pct(strategy_annual)}",
         f"  Макс. просадка:            {_pct(m.get('max_drawdown'))} "
         f"(длительность {m.get('max_drawdown_days', 'н/д')} дн.)",
-        f"  Шарп (безрисковая {rf:.2%}): {_num(m.get('sharpe'))}",
+        f"  Шарп (безрисковая: {rf_label}): {_num(m.get('sharpe'))}",
         f"  Сортино:                   {_num(m.get('sortino'))}",
         f"  Кальмар:                   {_num(m.get('calmar'))}",
         f"  Сделок: {m.get('n_trades', 0)} | Оборот: {fmt_rub(m.get('turnover', 0), 0)} ₽",
@@ -104,6 +110,15 @@ def full_report_ru(settings: Settings, result) -> str:
         f"  Всего: {fmt_rub(m.get('total_costs', 0))} ₽ "
         f"({_pct(m.get('costs_pct_of_gross'))} от валовой прибыли)",
     ]
+    if m.get("cash_interest") or m.get("dividends_net") or m.get("dividend_tax"):
+        lines += [
+            "",
+            "ДОХОДЫ СВЕРХ ИЗМЕНЕНИЯ ЦЕН:",
+            f"  Доход на свободные деньги (фонд денежного рынка): "
+            f"{fmt_rub(m.get('cash_interest', 0))} ₽",
+            f"  Дивиденды после НДФЛ: {fmt_rub(m.get('dividends_net', 0))} ₽ "
+            f"(удержано налога {fmt_rub(m.get('dividend_tax', 0))} ₽)",
+        ]
 
     total_ndfl = sum(result.ndfl_by_year.values())
     if result.ndfl_by_year:

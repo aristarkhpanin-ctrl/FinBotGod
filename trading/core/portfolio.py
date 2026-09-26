@@ -40,6 +40,9 @@ class Portfolio:
         self.realized_pnl_by_year: dict[int, float] = {}
         self.total_costs_paid = 0.0
         self.total_borrow_fees = 0.0
+        self.total_cash_interest = 0.0     # доход фонда денежного рынка на кэш
+        self.total_dividends_net = 0.0     # дивиденды после удержания НДФЛ
+        self.total_dividend_tax = 0.0
 
     def shares_of(self, secid: str) -> int:
         pos = self.positions.get(secid)
@@ -59,6 +62,34 @@ class Portfolio:
             raise PortfolioError(f"Плата за заём не может быть отрицательной: {fee}")
         self.cash -= fee
         self.total_borrow_fees += fee
+
+    def accrue_cash_interest(self, amount: float) -> None:
+        """Доход фонда денежного рынка на свободные деньги."""
+        if amount < 0:
+            raise PortfolioError(f"Доход на кэш не может быть отрицательным: {amount}")
+        self.cash += amount
+        self.total_cash_interest += amount
+
+    def receive_dividend(self, secid: str, amount_per_share: float,
+                         tax_rate: float) -> tuple[float, float]:
+        """Дивиденд по позиции на экс-дату. Возвращает (зачислено, налог).
+
+        Лонг получает дивиденд за вычетом НДФЛ, удержанного налоговым
+        агентом. Шорт платит владельцу бумаг полную сумму дивиденда.
+        """
+        shares = self.shares_of(secid)
+        if shares == 0 or amount_per_share <= 0:
+            return 0.0, 0.0
+        gross = shares * amount_per_share
+        if shares > 0:
+            tax = gross * tax_rate
+            self.cash += gross - tax
+            self.total_dividends_net += gross - tax
+            self.total_dividend_tax += tax
+            return gross - tax, tax
+        self.cash += gross          # gross < 0: шорт компенсирует дивиденд
+        self.total_dividends_net += gross
+        return gross, 0.0
 
     def _add_realized(self, realized: float, day: Date) -> None:
         self.realized_pnl_by_year[day.year] = (

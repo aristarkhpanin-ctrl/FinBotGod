@@ -61,6 +61,7 @@ class CostConfig(_Section):
 class BenchmarkConfig(_Section):
     risk_free_rate: float = Field(alias="безрисковая_ставка", ge=0, le=1)
     infra_cost_rub_year: float = Field(alias="инфраструктура_руб_год", ge=0)
+    mm_spread_pp: float = Field(alias="спред_денежного_рынка_пп", ge=0, le=5, default=0.5)
 
 
 class ConfirmedEvent(_Section):

@@ -83,6 +83,18 @@ class BacktestEngine:
         allow_short: bool = False,
         # allow_short: разрешить короткие позиции. Плата за заём бумаг
         # (издержки.ставка_займа_шорт_годовых) начисляется ежедневно.
+        cash_rate: pd.Series | None = None,
+        # cash_rate: годовая доходность денежного рынка по календарным дням
+        # (доля). Если задана — свободные деньги получают этот доход, а бенчмарк
+        # и Шарп считаются по исторической ставке, а не по постоянной.
+        dividends: dict[str, pd.DataFrame] | None = None,
+        # dividends: {тикер: DataFrame(ex_date, amount)} — держатель на закрытии
+        # дня перед экс-датой получает дивиденд (за вычетом НДФЛ).
+        universe_schedule: pd.Series | None = None,
+        # universe_schedule: индекс — дата среза, значение — множество тикеров
+        # в индексе на эту дату. Стратегия видит только бумаги из индекса
+        # на дату решения (защита от ошибки выживаемости).
+        benchmark_name: str = "IMOEX",
     ):
         if ledger is None:
             raise ValueError(
@@ -100,6 +112,12 @@ class BacktestEngine:
         self.allow_short = allow_short
         self.lot_sizes = lot_sizes
         self.cost_model = CostModel(settings.costs)
+        self.cash_rate = cash_rate.sort_index() if cash_rate is not None else None
+        self.benchmark_name = benchmark_name
+        self.universe_schedule = (
+            universe_schedule.sort_index() if universe_schedule is not None else None
+        )
+        self._raw_dividends = dividends or {}
 
         self.candles: dict[str, pd.DataFrame] = {}
         for secid, df in candles.items():
@@ -136,16 +154,82 @@ class BacktestEngine:
             index=self.dates,
         ).ffill()
 
+        # Дивиденды: каждая выплата привязывается к первой торговой дате
+        # движка не раньше экс-даты.
+        self._div_by_date: dict[pd.Timestamp, list[tuple[str, float]]] = {}
+        for secid, divs in self._raw_dividends.items():
+            if secid not in self.candles or divs is None or divs.empty:
+                continue
+            for ex_date, amount in zip(pd.to_datetime(divs["ex_date"]), divs["amount"]):
+                pos = self.dates.searchsorted(ex_date)
+                if pos < len(self.dates) and amount > 0:
+                    self._div_by_date.setdefault(self.dates[pos], []).append(
+                        (secid, float(amount))
+                    )
+
     # ---------- Вспомогательное ----------
 
+    def models_cash_interest(self) -> bool:
+        """True, если доход на кэш моделируется (ограничения нет)."""
+        return self.cash_rate is not None
+
+    def _members_asof(self, t: pd.Timestamp) -> frozenset | None:
+        """Состав индекса, действовавший на дату t (последний срез не позже t)."""
+        if self.universe_schedule is None:
+            return None
+        pos = self.universe_schedule.index.searchsorted(t, side="right") - 1
+        if pos < 0:
+            return frozenset()
+        return self.universe_schedule.iloc[pos]
+
     def _slices_until(self, t: pd.Timestamp) -> dict[str, pd.DataFrame]:
-        """Срезы данных по день T включительно — всё, что видит стратегия."""
+        """Срезы данных по день T включительно — всё, что видит стратегия.
+
+        При заданном составе индекса стратегия видит только бумаги, входившие
+        в индекс на дату T (и служебные ряды с префиксом «_»). Бумаги, которых
+        тогда не было в индексе, для неё не существуют — как и в реальности."""
+        members = self._members_asof(t)
         out = {}
         for secid, d in self.candles.items():
+            if members is not None and not secid.startswith("_") and secid not in members:
+                continue
             n = int(np.searchsorted(self._date_arrays[secid], t.to_datetime64(), side="right"))
             if n > 0:
                 out[secid] = d.iloc[:n]
         return out
+
+    def _accrue_interest(self, i: int, portfolio) -> None:
+        """Доход денежного рынка на свободные деньги за ночь(и) между барами."""
+        if self.cash_rate is None or i < 1:
+            return
+        prev_day, day = self.dates[i - 1], self.dates[i]
+        if self.trade_from is not None and prev_day < self.trade_from:
+            return          # до старта инвестирования денег ещё нет в системе
+        rpos = self.cash_rate.index.searchsorted(prev_day, side="right") - 1
+        if rpos < 0:
+            return
+        rate = float(self.cash_rate.iloc[rpos])
+        prev_row = self.closes_ffill.iloc[i - 1]
+        prices = {sec: float(prev_row[sec]) for sec in portfolio.positions}
+        free_cash = portfolio.cash - portfolio.short_value(prices)
+        if free_cash > 0 and rate > 0:
+            days = (day - prev_day).days
+            portfolio.accrue_cash_interest(free_cash * rate * days / 365.0)
+
+    def _pay_dividends(self, day, portfolio, decisions) -> None:
+        """Дивиденды по позициям, открытым на закрытии дня перед экс-датой."""
+        for secid, amount in self._div_by_date.get(day, []):
+            shares = portfolio.shares_of(secid)
+            if shares == 0:
+                continue
+            credited, tax = portfolio.receive_dividend(
+                secid, amount, self.settings.costs.ndfl_rate
+            )
+            decisions.append(
+                f"{day.date().isoformat()}  ДИВИДЕНД  {secid}  {shares:g} шт × "
+                f"{fmt_rub(amount)} ₽ | НДФЛ {fmt_rub(tax)} ₽ | "
+                f"зачислено {fmt_rub(credited)} ₽"
+            )
 
     def _valuation_prices(self, exec_idx: int, opens_row: pd.Series) -> dict[str, float]:
         """Цены для оценки портфеля при сайзинге: open дня исполнения,
@@ -200,6 +284,11 @@ class BacktestEngine:
             )
             if self.trade_from is not None and day < self.trade_from:
                 trading_allowed = False   # разогрев: сигналы есть, сделок нет
+            # До сделок дня: доход на кэш за ночь и дивиденды по экс-дате —
+            # они принадлежат позициям, открытым на вчерашнем закрытии.
+            self._accrue_interest(i, portfolio)
+            if i >= 1:
+                self._pay_dividends(day, portfolio, decisions)
             if i >= 1 and trading_allowed:
                 self.guards.new_day(day.date())
                 try:
@@ -262,7 +351,8 @@ class BacktestEngine:
         if self.trade_from is not None:
             equity = equity[equity.index >= self.trade_from]
         metrics = compute_metrics(
-            equity, s.benchmark.risk_free_rate, fills=execution.fills
+            equity, s.benchmark.risk_free_rate, fills=execution.fills,
+            rf_series=self.cash_rate,
         )
         if portfolio.total_borrow_fees > 0:
             # Плата за заём — такие же издержки, как комиссии и спред.
@@ -270,19 +360,34 @@ class BacktestEngine:
             metrics["total_costs"] = (
                 metrics.get("total_costs", 0.0) + portfolio.total_borrow_fees
             )
+        metrics["cash_interest"] = portfolio.total_cash_interest
+        metrics["dividends_net"] = portfolio.total_dividends_net
+        metrics["dividend_tax"] = portfolio.total_dividend_tax
         days_span = (equity.index[-1] - equity.index[0]).days
-        benchmarks = {
-            "денежный_рынок": money_market_benchmark(
+        if self.cash_rate is not None:
+            from trading.data.rates import money_market_benchmark_series
+
+            mm = money_market_benchmark_series(
+                float(equity.iloc[0]), equity.index[0], equity.index[-1], self.cash_rate
+            )
+        else:
+            mm = money_market_benchmark(
                 s.capital.start_amount, days_span, s.benchmark.risk_free_rate
-            ),
-        }
+            )
+        benchmarks = {"денежный_рынок": mm, "index_name": self.benchmark_name}
+        if not self.models_cash_interest():
+            limitations.append(
+                "Свободные деньги в симуляции НЕ приносят дохода (0%), а фонд "
+                "денежного рынка дал бы почти ключевую ставку — результат "
+                "стратегий с долей кэша занижен."
+            )
         if self.imoex_close is not None and len(self.imoex_close) >= 2:
             benchmarks["IMOEX"] = buy_and_hold_benchmark(self.imoex_close)
         else:
             benchmarks["IMOEX"] = None
             limitations.append(
-                "Данные индекса IMOEX за период недоступны — бенчмарк "
-                "«купил и держи индекс» не рассчитан."
+                f"Данные индекса {self.benchmark_name} за период недоступны — "
+                f"бенчмарк «купил и держи индекс» не рассчитан."
             )
         ndfl = self.cost_model.ndfl(portfolio.realized_pnl_by_year)
 
