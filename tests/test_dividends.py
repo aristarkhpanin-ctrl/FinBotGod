@@ -109,6 +109,19 @@ def test_unadjusted_for_split_dividend_is_rejected():
     assert len(rejected) == 1 and "500.00%" in rejected[0]
 
 
+def test_special_dividend_confirmed_by_price_gap_is_kept():
+    # Спецдивиденд 900 ₽ при цене 1 800 ₽ (50%): в экс-дату цена открылась
+    # на 850 ₽ ниже — рынок подтвердил выплату, её нельзя выбрасывать.
+    candles = flat_candles(10, price=1_800.0)
+    days = candles["date"]
+    candles.loc[5:, ["open", "high", "low", "close"]] = 950.0
+    ex = pd.DataFrame({"ex_date": [days.iloc[5]], "amount": [900.0],
+                       "record_date": [days.iloc[5]]})
+    from trading.data.dividends import check_dividend_yields
+    kept, rejected = check_dividend_yields(ex, candles)
+    assert kept["amount"].tolist() == [900.0] and rejected == []
+
+
 def test_short_pays_gross_dividend():
     p = Portfolio(20_000, allow_short=True)
     costs = CostModel(load_settings().costs).trade_costs(5_000, 1e9)

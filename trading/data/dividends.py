@@ -182,20 +182,30 @@ def check_dividend_yields(ex: pd.DataFrame, candles: pd.DataFrame,
     с дивидендами — часто БЕЗ неё. Тогда «дивиденд» выходит в сотни процентов
     от цены (или в тысячные доли процента). Такие выплаты отбрасываются —
     это занижает доход, но не выдумывает его. Список отброшенного — в отчёт.
+
+    Исключение — крупный спецдивиденд (выше ``high``), который подтверждён
+    рынком: в экс-дату цена открылась ниже вчерашнего закрытия хотя бы на
+    половину суммы дивиденда. Выплата без поправки на сплит такого гэпа
+    дать не может (он был бы больше самой цены).
     """
     if ex is None or ex.empty or candles is None or candles.empty:
         return ex, []
     c = candles.sort_values("date")
     dates = pd.to_datetime(c["date"]).values
     closes = c["close"].values
+    opens = c["open"].values if "open" in c else closes
     keep, rejected = [], []
     for row in ex.itertuples():
-        pos = int(np.searchsorted(dates, pd.Timestamp(row.ex_date).to_datetime64())) - 1
+        ex_pos = int(np.searchsorted(dates, pd.Timestamp(row.ex_date).to_datetime64()))
+        pos = ex_pos - 1
         if pos < 0:
             keep.append(False)
             continue
         ratio = float(row.amount) / float(closes[pos])
         ok = low <= ratio <= high
+        if not ok and ratio > high and ex_pos < len(dates):
+            gap = float(closes[pos]) - float(opens[ex_pos])
+            ok = gap >= 0.5 * float(row.amount)          # рынок подтвердил выплату
         keep.append(ok)
         if not ok:
             rejected.append(f"{pd.Timestamp(row.ex_date).date()} {row.amount:g} ₽ "
